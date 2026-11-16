@@ -73,7 +73,9 @@ function DimensionPage({ kind }: { kind: 'keywords' | 'pages' }) {
     const t = setTimeout(() => setDebounced(search), 300);
     return () => clearTimeout(t);
   }, [search]);
-  useEffect(() => setPage(0), [websiteId, filter, debounced, params]);
+  useEffect(() => {
+    setPage(0);
+  }, [websiteId, filter, debounced, params]);
   const pageSize = 50;
   const q = useRanged<Row[]>(kind, `/api/${kind}`, { websiteId, filter, search: debounced, sort: sort.key, dir: sort.dir, limit: pageSize, offset: page * pageSize });
   const total = Number(q.data?.meta?.total ?? 0);

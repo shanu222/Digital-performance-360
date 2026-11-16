@@ -105,7 +105,11 @@ function Chat({ configured }: { configured: boolean }) {
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const end = useRef<HTMLDivElement>(null);
-  useEffect(() => end.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), [msgs, busy]);
+  useEffect(() => {
+    // Braces matter: newer browsers return a Promise from scrollIntoView, and React
+    // would treat any returned value as a cleanup function and crash calling it.
+    end.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }, [msgs, busy]);
 
   const send = async (text: string) => {
     if (!text.trim() || busy) return;
