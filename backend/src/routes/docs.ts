@@ -1,0 +1,65 @@
+import { Router } from 'express';
+
+/** Lightweight machine-readable API index (all routes except /health and /auth/login require a session + CSRF header for writes). */
+const endpoints = [
+  ['GET', '/api/health', 'Liveness + database check (public)'],
+  ['POST', '/api/auth/login', '{email,password} → sets http-only session cookie, returns csrfToken'],
+  ['POST', '/api/auth/logout', 'End session'],
+  ['GET', '/api/auth/me', 'Current user + csrfToken'],
+  ['POST', '/api/auth/change-password', '{currentPassword,newPassword}'],
+  ['POST', '/api/google/connect', 'Returns Google consent URL (state + PKCE stored server-side)'],
+  ['GET', '/api/google/callback', 'OAuth redirect target (configure in Google Cloud)'],
+  ['GET', '/api/google/status', 'Connection status and granted scopes'],
+  ['POST', '/api/google/disconnect', 'Revoke + delete stored tokens'],
+  ['GET', '/api/integrations', 'Status of every integration'],
+  ['GET', '/api/integrations/properties', 'Discovered Search Console / GA4 / AdMob / Play properties'],
+  ['POST', '/api/integrations/discover', 'Queue property discovery'],
+  ['PATCH', '/api/integrations/{search-console|ga4|admob|play}/:id', '{isSelected}'],
+  ['POST', '/api/integrations/ga4/manual', '{propertyId,displayName}'],
+  ['POST|DELETE', '/api/integrations/play-service-account', '{json} service-account key (stored encrypted)'],
+  ['GET', '/api/overview?preset=', 'Portfolio KPIs + time series'],
+  ['GET|POST', '/api/websites', 'List (with metrics) / create'],
+  ['GET|PATCH|DELETE', '/api/websites/:id', 'Website dashboard / edit / remove from monitoring'],
+  ['GET', '/api/seo/summary?websiteId=&preset=', 'Search totals, trend, countries, devices'],
+  ['GET', '/api/seo/search-appearance?websiteId=', 'Live search-appearance breakdown'],
+  ['GET', '/api/keywords?websiteId=&filter=&search=&sort=&format=csv', 'Keyword comparison table'],
+  ['GET', '/api/keywords/trend?key=', 'Daily series for one keyword'],
+  ['GET', '/api/pages …', 'Same as keywords for pages'],
+  ['GET', '/api/indexing?websiteId=', 'Stored URL inspections'],
+  ['POST', '/api/indexing/inspect', '{websiteId,url} — URL Inspection API'],
+  ['GET', '/api/sitemaps?websiteId=', 'Sitemaps'],
+  ['GET', '/api/analytics/summary|comparisons|realtime?websiteId=', 'GA4 analytics'],
+  ['GET|POST', '/api/android-apps', 'List / register app'],
+  ['GET|PATCH|DELETE', '/api/android-apps/:id', 'App dashboard / link sources / remove'],
+  ['POST', '/api/android-apps/:id/import', 'CSV import of acquisition metrics {csv,fileName}'],
+  ['GET', '/api/app-health', 'Android vitals per app with health status'],
+  ['GET', '/api/admob/summary', 'Earnings for today/yesterday/7d/30d/month/prev month'],
+  ['GET', '/api/admob/report?preset=&appId=', 'Totals, daily, monthly, by app/country/format'],
+  ['GET', '/api/admob/fx?from=&to=USD|PKR', 'Display conversion rate with source + timestamp'],
+  ['GET', '/api/ai/insights', 'Stored AI recommendations'],
+  ['POST', '/api/ai/analyze', 'Queue AI analysis'],
+  ['POST', '/api/ai/chat', '{messages[]} — answers from the database via tools'],
+  ['POST', '/api/reports/generate', '{type,format:pdf|xlsx|csv,preset,websiteId?,appId?}'],
+  ['GET', '/api/reports', 'Previously generated files'],
+  ['GET', '/api/reports/files/:id/download', 'Download file'],
+  ['GET', '/api/reports/daily[/:date]', 'Daily reports'],
+  ['GET|PATCH', '/api/notifications[/:id]', 'Alerts'],
+  ['GET', '/api/sync/status|jobs', 'Sync progress + history'],
+  ['POST', '/api/sync/run', '{service,targetId?,start?,end?} manual sync / backfill'],
+  ['GET|PUT', '/api/settings', 'Timezone, currency, schedule, email, thresholds'],
+];
+
+export const apiDocs = Router();
+apiDocs.get('/', (_req, res) => {
+  res.json({
+    name: 'Digital Performance 360 API',
+    conventions: {
+      success: '{ ok: true, data, meta? }',
+      error: '{ ok: false, error: { code, message, details? } }',
+      auth: 'http-only session cookie (credentials: include) + X-CSRF-Token header on POST/PUT/PATCH/DELETE',
+      ranges: 'preset=today|yesterday|last7|last28|last30|last90|last180|this_month|last_month|custom (&start=&end=)',
+      nulls: 'null means "not available from the source" — never a fabricated zero',
+    },
+    endpoints: endpoints.map(([method, path, description]) => ({ method, path, description })),
+  });
+});
