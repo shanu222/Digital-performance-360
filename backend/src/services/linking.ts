@@ -18,11 +18,14 @@ export const normalizeDomain = (d: string) =>
 
 /** Reads the data streams of every GA4 property (web URLs and Android package names). */
 export async function discoverGa4Streams(client?: analyticsadmin_v1beta.Analyticsadmin) {
-  const admin = client ?? google.analyticsadmin({ version: 'v1beta', auth: await getAuthedClient() });
   const props = await db.select().from(ga4Properties).where(eq(ga4Properties.isAccessible, true));
+  const clients = new Map<string, analyticsadmin_v1beta.Analyticsadmin>();
   let streams = 0;
   for (const p of props) {
     try {
+      const key = p.googleAccountId ?? 'default';
+      if (!client && !clients.has(key)) clients.set(key, google.analyticsadmin({ version: 'v1beta', auth: await getAuthedClient(p.googleAccountId) }));
+      const admin = client ?? clients.get(key)!;
       const res = await withRetry(() => admin.properties.dataStreams.list({ parent: p.propertyName, pageSize: 200 }), { label: 'ga4.dataStreams' });
       const web = new Set<string>();
       const pkgs = new Set<string>();

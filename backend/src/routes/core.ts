@@ -25,7 +25,7 @@ import {
   buildAuthUrl,
   handleCallback,
   disconnectGoogle,
-  getActiveGoogleAccount,
+  listGoogleAccounts,
   savePlayServiceAccount,
   removePlayServiceAccount,
   getPlayServiceAccount,
@@ -142,27 +142,58 @@ google.post(
   h(async (req, res) => ok(res, { url: await buildAuthUrl(req.user!.id) })),
 );
 
+/** Public view of every connected Google account (never includes tokens). */
+async function accountsView() {
+  const all = await listGoogleAccounts();
+  const counts = (await db.execute(sql`
+    select a.id::text id,
+      (select count(*) from search_console_properties p where p.google_account_id = a.id and p.is_accessible)::int sc,
+      (select count(*) from ga4_properties p where p.google_account_id = a.id and p.is_accessible)::int ga4,
+      (select count(*) from admob_accounts p where p.google_account_id = a.id)::int admob
+    from google_accounts a`)) as unknown as { rows: Array<{ id: string; sc: number; ga4: number; admob: number }> };
+  return all.map((a) => {
+    const c = counts.rows.find((r) => r.id === a.google_accounts.id);
+    return {
+      id: a.google_accounts.id,
+      email: a.google_accounts.email,
+      status: a.google_accounts.status,
+      grantedScopes: a.google_accounts.grantedScopes,
+      connectedAt: a.google_accounts.connectedAt,
+      lastError: a.google_accounts.lastError,
+      properties: { searchConsole: c?.sc ?? 0, ga4: c?.ga4 ?? 0, admob: c?.admob ?? 0 },
+    };
+  });
+}
+
 google.get(
   '/status',
   h(async (_req, res) => {
-    const acct = await getActiveGoogleAccount();
+    const accounts = await accountsView();
+    const first = accounts.find((a) => a.status !== 'revoked') ?? accounts[0];
     ok(res, {
       configured: googleOAuthConfigured,
-      connected: Boolean(acct),
-      email: acct?.google_accounts.email ?? null,
-      status: acct?.google_accounts.status ?? null,
-      grantedScopes: acct?.google_accounts.grantedScopes ?? [],
+      connected: accounts.length > 0,
+      accounts,
+      email: first?.email ?? null,
+      status: first?.status ?? null,
+      grantedScopes: first?.grantedScopes ?? [],
       requestedScopes: ALL_OAUTH_SCOPES,
-      connectedAt: acct?.google_accounts.connectedAt ?? null,
-      lastError: acct?.google_accounts.lastError ?? null,
+      connectedAt: first?.connectedAt ?? null,
+      lastError: first?.lastError ?? null,
     });
   }),
 );
 
+google.get('/accounts', h(async (_req, res) => ok(res, await accountsView())));
+
+/** Disconnect one account ({accountId}) or all accounts (no body). */
 google.post(
   '/disconnect',
-  h(async (_req, res) => {
-    await disconnectGoogle();
+  h(async (req, res) => {
+    const { accountId } = parse(z.object({ accountId: z.string().uuid().optional() }), req.body ?? {});
+    await disconnectGoogle(accountId);
+    // another connected account may still be able to read the same properties
+    if ((await listGoogleAccounts()).length) await enqueue('discovery', { trigger: 'manual' });
     ok(res, { disconnected: true });
   }),
 );
@@ -176,7 +207,8 @@ integrations.get(
   '/',
   h(async (_req, res) => {
     const svcs = await db.select().from(connectedServices);
-    const acct = await getActiveGoogleAccount();
+    const accounts = await accountsView();
+    const acct = accounts.find((a) => a.status !== 'revoked') ?? accounts[0] ?? null;
     const play = await getPlayServiceAccount();
     const by = Object.fromEntries(svcs.map((s) => [s.service, { status: s.status, lastError: s.lastError, lastCheckedAt: s.lastCheckedAt, lastSuccessAt: s.lastSuccessAt, details: s.details }]));
     const [counts] = await db.execute(sql`
@@ -185,7 +217,7 @@ integrations.get(
              (select count(*) from admob_accounts)::int admob_accounts, (select count(*) from admob_apps)::int admob_apps,
              (select count(*) from play_console_apps)::int play_total, (select count(*) from play_console_apps where is_selected)::int play_selected`).then((r) => (r as unknown as { rows: Record<string, number>[] }).rows);
     ok(res, {
-      google: { oauthConfigured: googleOAuthConfigured, connected: Boolean(acct), email: acct?.google_accounts.email ?? null, status: acct?.google_accounts.status ?? null, scopes: acct?.google_accounts.grantedScopes ?? [] },
+      google: { oauthConfigured: googleOAuthConfigured, connected: accounts.length > 0, email: acct?.email ?? null, status: acct?.status ?? null, scopes: acct?.grantedScopes ?? [], accounts },
       services: {
         search_console: by.search_console ?? { status: acct ? 'connected' : 'not_configured' },
         ga4: by.ga4 ?? { status: acct ? 'connected' : 'not_configured' },
@@ -211,10 +243,12 @@ integrations.get(
 integrations.get(
   '/properties',
   h(async (_req, res) => {
+    const emails = new Map((await listGoogleAccounts()).map((a) => [a.google_accounts.id, a.google_accounts.email]));
+    const withEmail = <T extends { googleAccountId: string | null }>(rows: T[]) => rows.map((r) => ({ ...r, accountEmail: r.googleAccountId ? emails.get(r.googleAccountId) ?? null : null }));
     const [sc, ga, accts, apps, play] = await Promise.all([
-      db.select().from(searchConsoleProperties).orderBy(searchConsoleProperties.siteUrl),
-      db.select().from(ga4Properties).orderBy(ga4Properties.displayName),
-      db.select().from(admobAccounts),
+      db.select().from(searchConsoleProperties).orderBy(searchConsoleProperties.siteUrl).then(withEmail),
+      db.select().from(ga4Properties).orderBy(ga4Properties.displayName).then(withEmail),
+      db.select().from(admobAccounts).then(withEmail),
       db.select().from(admobApps).orderBy(admobApps.displayName),
       db.select().from(playConsoleApps).orderBy(playConsoleApps.displayName),
     ]);

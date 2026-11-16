@@ -6,7 +6,7 @@ import { addDays, todayIn } from '../../lib/dates.js';
 import { errorMessage, logger } from '../../lib/logger.js';
 import { isAuthError } from '../../lib/retry.js';
 import { getSettings } from '../settings.js';
-import { getActiveGoogleAccount, getPlayServiceAccount, markGoogleRevoked, setServiceStatus } from '../google/oauth.js';
+import { activeGoogleAccounts, listGoogleAccounts, getPlayServiceAccount, markGoogleRevoked, setServiceStatus } from '../google/oauth.js';
 import { discoverSearchConsoleProperties, syncSearchConsoleProperty, ensureWebsitesForSelected } from '../google/searchConsole.js';
 import { discoverGa4Properties, syncGa4Property } from '../google/ga4.js';
 import { discoverAdmob, syncAdmobAccount } from '../google/admob.js';
@@ -32,7 +32,7 @@ export function syncWindow(lastDataDate: string | null, today: string, backfillD
   return { start: fromLast, end };
 }
 
-async function runTargets<T extends { id: string; label: string }>(
+async function runTargets<T extends { id: string; label: string; googleAccountId?: string | null }>(
   job: Job,
   targets: T[],
   concurrency: number,
@@ -43,17 +43,22 @@ async function runTargets<T extends { id: string; label: string }>(
   let done = 0;
   const ok: Record<string, unknown> = {};
   const errors: string[] = [];
-  let authFailure: string | null = null;
+  // auth failures are tracked per Google account so one revoked login doesn't stop the others
+  const brokenAccounts = new Map<string, string>();
   await Promise.all(
     targets.map((t) =>
       limit(async () => {
-        if (authFailure) return; // stop hammering Google once auth is known to be broken
+        const acctKey = t.googleAccountId ?? 'default';
+        if (brokenAccounts.has(acctKey)) {
+          errors.push(`${t.label}: skipped — Google login for this property needs reconnecting`);
+          return;
+        }
         try {
           ok[t.label] = await fn(t);
           await log(job.id, 'info', `Synced ${t.label}`, { result: ok[t.label] as Record<string, unknown> });
         } catch (err) {
           const msg = errorMessage(err);
-          if (isAuthError(err)) authFailure = msg;
+          if (isAuthError(err)) brokenAccounts.set(acctKey, msg);
           errors.push(`${t.label}: ${msg}`);
           await onError(t, msg); // error isolation: other targets continue
           await log(job.id, 'error', `Failed ${t.label}: ${msg}`);
@@ -64,15 +69,17 @@ async function runTargets<T extends { id: string; label: string }>(
       }),
     ),
   );
-  if (authFailure) {
-    await markGoogleRevoked(authFailure);
+  for (const [acctKey, reason] of brokenAccounts) {
+    const accountId = acctKey === 'default' ? null : acctKey;
+    const email = accountId ? (await listGoogleAccounts()).find((a) => a.google_accounts.id === accountId)?.google_accounts.email : null;
+    await markGoogleRevoked(reason, accountId);
     await raiseNotification({
       type: 'oauth_problem',
       severity: 'critical',
-      title: 'Google authorization problem',
-      description: `Google rejected the stored credentials: ${authFailure}`,
-      recommendedAction: 'Open Integrations and reconnect your Google account.',
-      dedupeKey: `oauth:${todayIn('UTC')}`,
+      title: `Google authorization problem${email ? ` — ${email}` : ''}`,
+      description: `Google rejected the stored credentials: ${reason}`,
+      recommendedAction: 'Open Integrations and click Reconnect on that Google account.',
+      dedupeKey: `oauth:${acctKey}:${todayIn('UTC')}`,
     });
   }
   if (errors.length && errors.length === targets.length) throw new Error(errors.join(' | '));
@@ -80,9 +87,9 @@ async function runTargets<T extends { id: string; label: string }>(
 }
 
 async function requireGoogle() {
-  const acct = await getActiveGoogleAccount();
-  if (!acct) throw Object.assign(new Error('Google account is not connected'), { nonRetryable: true });
-  if (acct.google_accounts.status === 'revoked') throw Object.assign(new Error('Google access revoked — reconnect required'), { nonRetryable: true });
+  const all = await listGoogleAccounts();
+  if (!all.length) throw Object.assign(new Error('Google account is not connected'), { nonRetryable: true });
+  if (!all.some((a) => a.google_accounts.status !== 'revoked')) throw Object.assign(new Error('Google access revoked — reconnect required'), { nonRetryable: true });
 }
 
 export async function handleJob(job: Job): Promise<HandlerResult> {
@@ -96,23 +103,33 @@ export async function handleJob(job: Job): Promise<HandlerResult> {
     case 'discovery': {
       const result: Record<string, unknown> = {};
       const errors: string[] = [];
-      const google = await getActiveGoogleAccount();
-      if (google && google.google_accounts.status === 'active') {
-        const steps: Array<[string, () => Promise<unknown>]> = [
-          ['search_console', discoverSearchConsoleProperties],
-          ['ga4', discoverGa4Properties],
-          ['admob', discoverAdmob],
-        ];
-        for (const [svc, fn] of steps) {
-          try {
-            result[svc] = await fn();
-            await setServiceStatus(svc, 'connected', { success: true });
-          } catch (err) {
-            const msg = errorMessage(err);
-            errors.push(`${svc}: ${msg}`);
-            await setServiceStatus(svc, isAuthError(err) ? 'revoked' : 'error', { error: msg });
-            if (isAuthError(err)) await markGoogleRevoked(msg);
+      const accounts = await activeGoogleAccounts();
+      if (accounts.length) {
+        const ok: Record<string, boolean> = {};
+        for (const a of accounts) {
+          const id = a.google_accounts.id;
+          const label = a.google_accounts.email ?? id;
+          const steps: Array<[string, () => Promise<unknown>]> = [
+            ['search_console', () => discoverSearchConsoleProperties(undefined, id)],
+            ['ga4', () => discoverGa4Properties(undefined, id)],
+            ['admob', () => discoverAdmob(undefined, id)],
+          ];
+          for (const [svc, fn] of steps) {
+            try {
+              result[`${svc}:${label}`] = await fn();
+              ok[svc] = true;
+            } catch (err) {
+              const msg = errorMessage(err);
+              errors.push(`${svc} (${label}): ${msg}`);
+              if (isAuthError(err)) {
+                await markGoogleRevoked(msg, id);
+                break; // this account's login is broken; continue with the next account
+              }
+            }
           }
+        }
+        for (const svc of ['search_console', 'ga4', 'admob']) {
+          await setServiceStatus(svc, ok[svc] ? 'connected' : 'error', ok[svc] ? { success: true } : { error: errors.filter((e) => e.startsWith(svc)).join(' | ') || 'No account could read this service' });
         }
         await ensureWebsitesForSelected();
         try {

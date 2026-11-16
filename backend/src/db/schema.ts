@@ -116,6 +116,8 @@ export const connectedServices = pgTable('connected_services', {
 export const searchConsoleProperties = pgTable('search_console_properties', {
   id: uuid('id').primaryKey().defaultRandom(),
   siteUrl: text('site_url').notNull().unique(),
+  /** connected Google account used to read this property */
+  googleAccountId: uuid('google_account_id').references(() => googleAccounts.id, { onDelete: 'set null' }),
   /** domain | url_prefix */
   propertyType: text('property_type').notNull(),
   permissionLevel: text('permission_level'),
@@ -133,6 +135,7 @@ export const ga4Properties = pgTable('ga4_properties', {
   id: uuid('id').primaryKey().defaultRandom(),
   /** properties/123456 */
   propertyName: text('property_name').notNull().unique(),
+  googleAccountId: uuid('google_account_id').references(() => googleAccounts.id, { onDelete: 'set null' }),
   displayName: text('display_name').notNull(),
   accountName: text('account_name'),
   accountDisplayName: text('account_display_name'),
@@ -190,6 +193,7 @@ export const admobAccounts = pgTable('admob_accounts', {
   id: uuid('id').primaryKey().defaultRandom(),
   /** accounts/pub-XXXXXXXX */
   resourceName: text('resource_name').notNull().unique(),
+  googleAccountId: uuid('google_account_id').references(() => googleAccounts.id, { onDelete: 'set null' }),
   publisherId: text('publisher_id').notNull(),
   currencyCode: text('currency_code'),
   reportingTimeZone: text('reporting_time_zone'),

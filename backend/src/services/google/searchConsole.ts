@@ -16,9 +16,16 @@ import { withRetry } from '../../lib/retry.js';
 import { chunk } from '../../lib/util.js';
 import { notFound } from '../../lib/http.js';
 
-export async function scClient(): Promise<searchconsole_v1.Searchconsole> {
-  return google.searchconsole({ version: 'v1', auth: await getAuthedClient() });
+export async function scClient(accountId?: string | null): Promise<searchconsole_v1.Searchconsole> {
+  return google.searchconsole({ version: 'v1', auth: await getAuthedClient(accountId) });
 }
+
+/**
+ * Keeps the account that already reads a property unless that account is gone
+ * or revoked; a newly connected account then takes over.
+ */
+const keepAccount = (col: string, table: string) =>
+  sql.raw(`coalesce((select ga.id from google_accounts ga where ga.id = ${table}.${col} and ga.status <> 'revoked'), excluded.${col})`);
 
 export function propertyTypeOf(siteUrl: string) {
   return siteUrl.startsWith('sc-domain:') ? 'domain' : 'url_prefix';
@@ -34,8 +41,8 @@ export function domainOf(siteUrl: string) {
 }
 
 /** Sites API: discover every property the connected account can access. */
-export async function discoverSearchConsoleProperties(client?: searchconsole_v1.Searchconsole) {
-  const sc = client ?? (await scClient());
+export async function discoverSearchConsoleProperties(client?: searchconsole_v1.Searchconsole, accountId?: string | null) {
+  const sc = client ?? (await scClient(accountId));
   const res = await withRetry(() => sc.sites.list(), { label: 'sc.sites.list' });
   const entries = (res.data.siteEntry ?? []).filter((s) => s.siteUrl);
   const urls: string[] = [];
@@ -48,22 +55,28 @@ export async function discoverSearchConsoleProperties(client?: searchconsole_v1.
         propertyType: propertyTypeOf(s.siteUrl!),
         permissionLevel: s.permissionLevel ?? null,
         isAccessible: s.permissionLevel !== 'siteUnverifiedUser',
+        googleAccountId: s.permissionLevel === 'siteUnverifiedUser' ? null : accountId ?? null,
       })
       .onConflictDoUpdate({
         target: searchConsoleProperties.siteUrl,
-        set: {
-          permissionLevel: s.permissionLevel ?? null,
-          isAccessible: s.permissionLevel !== 'siteUnverifiedUser',
-          updatedAt: new Date(),
-        },
+        // a verified permission from any account wins over an unverified one
+        set:
+          s.permissionLevel === 'siteUnverifiedUser'
+            ? { updatedAt: new Date() }
+            : {
+                permissionLevel: s.permissionLevel ?? null,
+                isAccessible: true,
+                googleAccountId: keepAccount('google_account_id', 'search_console_properties'),
+                updatedAt: new Date(),
+              },
       });
   }
-  // Properties no longer returned by Google lose access but keep their history.
-  if (urls.length) {
+  // Properties this account no longer returns lose access (history is kept).
+  if (accountId) {
     await db
       .update(searchConsoleProperties)
       .set({ isAccessible: false, updatedAt: new Date() })
-      .where(notInArray(searchConsoleProperties.siteUrl, urls));
+      .where(and(eq(searchConsoleProperties.googleAccountId, accountId), urls.length ? notInArray(searchConsoleProperties.siteUrl, urls) : sql`true`));
   }
   return entries.length;
 }
@@ -119,7 +132,7 @@ export async function syncSearchConsoleProperty(
 ): Promise<ScSyncResult> {
   const [prop] = await db.select().from(searchConsoleProperties).where(eq(searchConsoleProperties.id, propertyId));
   if (!prop) throw notFound('Search Console property');
-  const sc = opts.client ?? (await scClient());
+  const sc = opts.client ?? (await scClient(prop.googleAccountId));
   const base = { startDate: range.start, endDate: range.end, dataState: 'all', type: 'web' };
   const now = new Date();
 
@@ -323,7 +336,7 @@ export async function syncSitemaps(propertyId: string, siteUrl: string, sc: sear
 export async function inspectUrl(propertyId: string, url: string, client?: searchconsole_v1.Searchconsole) {
   const [prop] = await db.select().from(searchConsoleProperties).where(eq(searchConsoleProperties.id, propertyId));
   if (!prop) throw notFound('Search Console property');
-  const sc = client ?? (await scClient());
+  const sc = client ?? (await scClient(prop.googleAccountId));
   const res = await withRetry(
     () => sc.urlInspection.index.inspect({ requestBody: { inspectionUrl: url, siteUrl: prop.siteUrl, languageCode: 'en-US' } }),
     { label: 'sc.urlInspection', retries: 2 },
@@ -356,7 +369,7 @@ export async function inspectUrl(propertyId: string, url: string, client?: searc
 export async function liveSearchAppearance(propertyId: string, range: { start: string; end: string }) {
   const [prop] = await db.select().from(searchConsoleProperties).where(eq(searchConsoleProperties.id, propertyId));
   if (!prop) throw notFound('Search Console property');
-  const sc = await scClient();
+  const sc = await scClient(prop.googleAccountId);
   const res = await withRetry(() =>
     sc.searchanalytics.query({
       siteUrl: prop.siteUrl,

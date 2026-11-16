@@ -6,27 +6,26 @@ import { api, post } from '../lib/api';
 import { useToast, errMsg } from '../lib/context';
 import { Button, Card, Notice, PageHeader, StatusBadge, Toggle, Skeleton, Empty } from '../components/ui';
 import { useAction } from '../lib/hooks';
+import { GoogleAccountsCard, connectGoogle, type GoogleAccount } from '../components/GoogleAccounts';
 import { fmtAgo } from '../lib/format';
 
 interface GoogleStatus {
   configured: boolean;
   connected: boolean;
+  accounts?: GoogleAccount[];
   email: string | null;
   status: string | null;
   grantedScopes: string[];
 }
 interface Props {
-  searchConsole: Array<{ id: string; siteUrl: string; propertyType: string; permissionLevel: string | null; isSelected: boolean; isAccessible: boolean; syncStatus: string; lastSyncedAt: string | null }>;
-  ga4: Array<{ id: string; displayName: string; propertyName: string; accountDisplayName: string | null; isSelected: boolean; syncStatus: string; lastSyncedAt: string | null }>;
-  admobAccounts: Array<{ id: string; publisherId: string; currencyCode: string | null; isSelected: boolean; syncStatus: string; lastSyncedAt: string | null }>;
+  searchConsole: Array<{ id: string; siteUrl: string; propertyType: string; permissionLevel: string | null; isSelected: boolean; isAccessible: boolean; syncStatus: string; lastSyncedAt: string | null; accountEmail: string | null }>;
+  ga4: Array<{ id: string; displayName: string; propertyName: string; accountDisplayName: string | null; isSelected: boolean; syncStatus: string; lastSyncedAt: string | null; accountEmail: string | null }>;
+  admobAccounts: Array<{ id: string; publisherId: string; currencyCode: string | null; isSelected: boolean; syncStatus: string; lastSyncedAt: string | null; accountEmail: string | null }>;
   admobApps: Array<{ id: string; displayName: string | null; appId: string; platform: string | null; storeId: string | null }>;
   playApps: Array<{ id: string; displayName: string | null; packageName: string; isSelected: boolean; syncStatus: string }>;
 }
 
-export async function connectGoogle() {
-  const { url } = await post<{ url: string }>('/api/google/connect');
-  window.location.assign(url);
-}
+export { connectGoogle };
 
 export function PropertySelector() {
   const props = useQuery({ queryKey: ['properties'], queryFn: () => api<Props>('/api/integrations/properties'), refetchInterval: 15_000 });
@@ -52,21 +51,21 @@ export function PropertySelector() {
     <div className="grid gap-5 xl:grid-cols-2">
       <Card title="Search Console properties" subtitle={`${d.searchConsole.length} discovered · switch on one property per site (prefer sc-domain:)`} source="Sites API">
         {d.searchConsole.length ? (
-          <ul className="divide-y divide-line">{d.searchConsole.map((p) => row(p.id, p.siteUrl, `${p.propertyType === 'domain' ? 'Domain property' : 'URL-prefix property'} · ${p.permissionLevel ?? 'unknown permission'}`, p.isSelected, 'search-console', p.id, p.syncStatus, p.lastSyncedAt, !p.isAccessible))}</ul>
+          <ul className="divide-y divide-line">{[...d.searchConsole].sort((a, b) => Number(b.isAccessible) - Number(a.isAccessible) || a.siteUrl.localeCompare(b.siteUrl)).map((p) => row(p.id, p.siteUrl, `${p.propertyType === 'domain' ? 'Domain property' : 'URL-prefix property'} · ${p.permissionLevel ?? 'unknown permission'}${p.accountEmail ? ` · via ${p.accountEmail}` : ''}`, p.isSelected, 'search-console', p.id, p.syncStatus, p.lastSyncedAt, !p.isAccessible))}</ul>
         ) : (
           <Empty title="No properties found yet">Discovery runs right after connecting. The connected account must have access in Search Console.</Empty>
         )}
       </Card>
       <Card title="Google Analytics 4 properties" subtitle={`${d.ga4.length} discovered`} source="Admin API">
         {d.ga4.length ? (
-          <ul className="divide-y divide-line">{d.ga4.map((p) => row(p.id, p.displayName, `${p.propertyName} · ${p.accountDisplayName ?? ''}`, p.isSelected, 'ga4', p.id, p.syncStatus, p.lastSyncedAt))}</ul>
+          <ul className="divide-y divide-line">{d.ga4.map((p) => row(p.id, p.displayName, `${p.propertyName} · ${p.accountDisplayName ?? ''}${p.accountEmail ? ` · via ${p.accountEmail}` : ''}`, p.isSelected, 'ga4', p.id, p.syncStatus, p.lastSyncedAt))}</ul>
         ) : (
           <Empty title="No GA4 properties found">You can add one manually on the Integrations page.</Empty>
         )}
       </Card>
       <Card title="AdMob accounts" subtitle={`${d.admobAccounts.length} account(s) · ${d.admobApps.length} apps`} source="AdMob API">
         {d.admobAccounts.length ? (
-          <ul className="divide-y divide-line">{d.admobAccounts.map((a) => row(a.id, a.publisherId, `Reporting currency ${a.currencyCode ?? '—'}`, a.isSelected, 'admob', a.id, a.syncStatus, a.lastSyncedAt))}</ul>
+          <ul className="divide-y divide-line">{d.admobAccounts.map((a) => row(a.id, a.publisherId, `Reporting currency ${a.currencyCode ?? '—'}${a.accountEmail ? ` · via ${a.accountEmail}` : ''}`, a.isSelected, 'admob', a.id, a.syncStatus, a.lastSyncedAt))}</ul>
         ) : (
           <Empty title="No AdMob account found">The connected Google account must be a user on the AdMob account.</Empty>
         )}
@@ -102,27 +101,14 @@ export default function Onboarding() {
   const s = status.data;
   return (
     <div>
-      <PageHeader eyebrow="Setup" title="Connect your Google account" subtitle="One secure, read-only connection discovers every Search Console, Analytics and AdMob property you can access." />
-      <div className="grid gap-5 lg:grid-cols-[1.2fr_1fr]">
+      <PageHeader eyebrow="Setup" title="Connect your Google account" subtitle="Connect one or more Google accounts (read-only). Every Search Console, Analytics and AdMob property they can access is discovered." />
+      {s?.connected && <div className="mb-5"><GoogleAccountsCard accounts={s.accounts ?? []} configured={s.configured} /></div>}
+      <div className={s?.connected ? 'hidden' : 'grid gap-5 lg:grid-cols-[1.2fr_1fr]'}>
         <Card>
           {status.isLoading ? (
             <Skeleton className="h-40" />
           ) : s?.connected ? (
-            <div className="flex items-start gap-4">
-              <div className="rounded-xl bg-good-soft p-3 text-good">
-                <CheckCircle2 className="h-6 w-6" />
-              </div>
-              <div className="flex-1">
-                <div className="text-lg font-bold">Connected as {s.email}</div>
-                <div className="mt-1 text-sm text-ink-2">Choose below which properties to monitor. Selected properties are synchronized automatically every day, even when you are not logged in.</div>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <StatusBadge status={s.status ?? 'connected'} />
-                  <Button size="sm" onClick={() => post('/api/integrations/discover').then(() => toast('info', 'Discovery queued')).catch((e) => toast('error', errMsg(e)))}>
-                    Re-discover properties
-                  </Button>
-                </div>
-              </div>
-            </div>
+            null
           ) : (
             <div>
               <div className="text-lg font-bold">Connect Google Account</div>

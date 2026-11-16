@@ -1,7 +1,7 @@
 import { OAuth2Client, GoogleAuth, type JWTInput } from 'google-auth-library';
 import { and, eq, gt, lt } from 'drizzle-orm';
 import { db } from '../../db/client.js';
-import { googleAccounts, oauthCredentials, oauthStates, connectedServices } from '../../db/schema.js';
+import { googleAccounts, oauthCredentials, oauthStates, connectedServices, searchConsoleProperties, ga4Properties, admobAccounts } from '../../db/schema.js';
 import { env, googleOAuthConfigured } from '../../config/env.js';
 import { decrypt, encrypt, randomToken } from '../../lib/crypto.js';
 import { AppError } from '../../lib/http.js';
@@ -53,7 +53,7 @@ export async function buildAuthUrl(userId: string) {
   });
   return client.generateAuthUrl({
     access_type: 'offline',
-    prompt: 'consent', // guarantees a refresh token on reconnect
+    prompt: 'consent select_account', // refresh token on every connect + let the admin pick another Google account
     include_granted_scopes: true,
     scope: ALL_OAUTH_SCOPES,
     state,
@@ -146,25 +146,36 @@ async function refreshServiceStatusFromScopes(granted: string[]) {
   });
 }
 
-export async function getActiveGoogleAccount() {
-  const [acct] = await db
+/** All connected Google accounts with their (encrypted) credentials. */
+export async function listGoogleAccounts() {
+  return db
     .select()
     .from(googleAccounts)
     .innerJoin(oauthCredentials, eq(oauthCredentials.googleAccountId, googleAccounts.id))
-    .orderBy(googleAccounts.updatedAt)
-    .limit(1);
-  return acct ?? null;
+    .orderBy(googleAccounts.connectedAt);
+}
+
+export async function activeGoogleAccounts() {
+  return (await listGoogleAccounts()).filter((a) => a.google_accounts.status !== 'revoked');
+}
+
+/** First connected account (kept for callers that only need "is Google connected"). */
+export async function getActiveGoogleAccount() {
+  const all = await listGoogleAccounts();
+  return all.find((a) => a.google_accounts.status !== 'revoked') ?? all[0] ?? null;
 }
 
 /**
- * Returns an OAuth2 client with the stored refresh token. google-auth-library refreshes
- * access tokens automatically; we persist new tokens (encrypted) when they rotate.
+ * OAuth2 client for a specific connected account (the one that can access the
+ * property being read). Falls back to the first active account when not given.
+ * google-auth-library refreshes access tokens; new tokens are persisted encrypted.
  */
-export async function getAuthedClient(): Promise<OAuth2Client> {
-  const acct = await getActiveGoogleAccount();
-  if (!acct) throw new AppError(409, 'google_not_connected', 'Google account is not connected');
+export async function getAuthedClient(accountId?: string | null): Promise<OAuth2Client> {
+  const all = await listGoogleAccounts();
+  const acct = accountId ? all.find((a) => a.google_accounts.id === accountId) : all.find((a) => a.google_accounts.status !== 'revoked');
+  if (!acct) throw new AppError(409, 'google_not_connected', accountId ? 'The Google account for this property is no longer connected' : 'Google account is not connected');
   if (acct.google_accounts.status === 'revoked') {
-    throw new AppError(409, 'google_revoked', 'Google access was revoked. Reconnect your Google account.');
+    throw new AppError(409, 'google_revoked', `Google access for ${acct.google_accounts.email ?? 'this account'} was revoked. Reconnect it on the Integrations page.`);
   }
   const client = newOAuthClient();
   const cred = acct.oauth_credentials;
@@ -186,25 +197,33 @@ export async function getAuthedClient(): Promise<OAuth2Client> {
   return client;
 }
 
-/** Called when Google answers invalid_grant / 401 — the user revoked access or the token expired. */
-export async function markGoogleRevoked(reason: string) {
-  await db.update(googleAccounts).set({ status: 'revoked', lastError: reason, updatedAt: new Date() });
-  for (const s of ['search_console', 'ga4', 'admob']) await setServiceStatus(s, 'revoked', { error: reason });
+/** Called when Google answers invalid_grant / 401 for one account. */
+export async function markGoogleRevoked(reason: string, accountId?: string | null) {
+  await db
+    .update(googleAccounts)
+    .set({ status: 'revoked', lastError: reason, updatedAt: new Date() })
+    .where(accountId ? eq(googleAccounts.id, accountId) : undefined);
+  const remaining = await activeGoogleAccounts();
+  if (!remaining.length) for (const s of ['search_console', 'ga4', 'admob']) await setServiceStatus(s, 'revoked', { error: reason });
 }
 
-/** Disconnect: revoke at Google (best effort) and delete stored credentials. */
-export async function disconnectGoogle() {
-  const acct = await getActiveGoogleAccount();
-  if (acct) {
+/** Disconnect one account (or all): revoke at Google (best effort) and delete stored credentials. History is kept. */
+export async function disconnectGoogle(accountId?: string) {
+  const all = await listGoogleAccounts();
+  const targets = accountId ? all.filter((a) => a.google_accounts.id === accountId) : all;
+  for (const acct of targets) {
     try {
-      const client = newOAuthClient();
-      await client.revokeToken(decrypt(acct.oauth_credentials.encryptedRefreshToken));
+      await newOAuthClient().revokeToken(decrypt(acct.oauth_credentials.encryptedRefreshToken));
     } catch (err) {
       logger.warn({ err: errorMessage(err) }, 'Token revocation at Google failed (continuing with local removal)');
     }
+    // properties only this account could read become inaccessible until another account rediscovers them
+    await db.update(searchConsoleProperties).set({ isAccessible: false }).where(eq(searchConsoleProperties.googleAccountId, acct.google_accounts.id));
+    await db.update(ga4Properties).set({ isAccessible: false }).where(eq(ga4Properties.googleAccountId, acct.google_accounts.id));
+    await db.update(admobAccounts).set({ isSelected: false }).where(eq(admobAccounts.googleAccountId, acct.google_accounts.id));
     await db.delete(googleAccounts).where(eq(googleAccounts.id, acct.google_accounts.id));
   }
-  for (const s of ['search_console', 'ga4', 'admob']) await setServiceStatus(s, 'not_configured');
+  if (!(await listGoogleAccounts()).length) for (const s of ['search_console', 'ga4', 'admob']) await setServiceStatus(s, 'not_configured');
 }
 
 /* ---------------- Play Developer Reporting service account ---------------- */

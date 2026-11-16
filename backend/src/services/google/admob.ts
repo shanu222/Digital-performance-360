@@ -8,13 +8,13 @@ import { chunk, ga4Date } from '../../lib/util.js';
 import { toYmdParts } from '../../lib/dates.js';
 import { notFound } from '../../lib/http.js';
 
-export async function admobClient(): Promise<admob_v1.Admob> {
-  return google.admob({ version: 'v1', auth: await getAuthedClient() });
+export async function admobClient(accountId?: string | null): Promise<admob_v1.Admob> {
+  return google.admob({ version: 'v1', auth: await getAuthedClient(accountId) });
 }
 
 /** Discover AdMob publisher accounts, apps and ad units; link Android apps by Play package name. */
-export async function discoverAdmob(client?: admob_v1.Admob) {
-  const api = client ?? (await admobClient());
+export async function discoverAdmob(client?: admob_v1.Admob, accountId?: string | null) {
+  const api = client ?? (await admobClient(accountId));
   const accts = await withRetry(() => api.accounts.list({ pageSize: 20 }), { label: 'admob.accounts.list' });
   let appCount = 0;
   for (const a of accts.data.account ?? []) {
@@ -26,10 +26,16 @@ export async function discoverAdmob(client?: admob_v1.Admob) {
         publisherId: a.publisherId ?? a.name.replace('accounts/', ''),
         currencyCode: a.currencyCode ?? null,
         reportingTimeZone: a.reportingTimeZone ?? null,
+        googleAccountId: accountId ?? null,
       })
       .onConflictDoUpdate({
         target: admobAccounts.resourceName,
-        set: { currencyCode: a.currencyCode ?? null, reportingTimeZone: a.reportingTimeZone ?? null, updatedAt: new Date() },
+        set: {
+          currencyCode: a.currencyCode ?? null,
+          reportingTimeZone: a.reportingTimeZone ?? null,
+          googleAccountId: sql.raw(`coalesce((select ga.id from google_accounts ga where ga.id = admob_accounts.google_account_id and ga.status <> 'revoked'), excluded.google_account_id)`),
+          updatedAt: new Date(),
+        },
       })
       .returning();
 
@@ -110,7 +116,7 @@ const microsOf = (v?: admob_v1.Schema$ReportRowMetricValue) => (v?.microsValue !
 export async function syncAdmobAccount(accountId: string, range: { start: string; end: string }, client?: admob_v1.Admob) {
   const [acct] = await db.select().from(admobAccounts).where(eq(admobAccounts.id, accountId));
   if (!acct) throw notFound('AdMob account');
-  const api = client ?? (await admobClient());
+  const api = client ?? (await admobClient(acct.googleAccountId));
   const res = await withRetry(
     () =>
       api.accounts.networkReport.generate({

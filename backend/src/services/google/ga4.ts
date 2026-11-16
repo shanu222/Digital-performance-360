@@ -1,5 +1,5 @@
 import { google, type analyticsdata_v1beta, type analyticsadmin_v1beta } from 'googleapis';
-import { eq, notInArray, sql } from 'drizzle-orm';
+import { and, eq, notInArray, sql } from 'drizzle-orm';
 import { db } from '../../db/client.js';
 import { ga4Properties, analyticsDailyMetrics } from '../../db/schema.js';
 import { getAuthedClient } from './oauth.js';
@@ -9,16 +9,16 @@ import { notFound } from '../../lib/http.js';
 import { upsertBreakdown } from './searchConsole.js';
 import { errorMessage } from '../../lib/logger.js';
 
-export async function dataClient(): Promise<analyticsdata_v1beta.Analyticsdata> {
-  return google.analyticsdata({ version: 'v1beta', auth: await getAuthedClient() });
+export async function dataClient(accountId?: string | null): Promise<analyticsdata_v1beta.Analyticsdata> {
+  return google.analyticsdata({ version: 'v1beta', auth: await getAuthedClient(accountId) });
 }
-export async function adminClient(): Promise<analyticsadmin_v1beta.Analyticsadmin> {
-  return google.analyticsadmin({ version: 'v1beta', auth: await getAuthedClient() });
+export async function adminClient(accountId?: string | null): Promise<analyticsadmin_v1beta.Analyticsadmin> {
+  return google.analyticsadmin({ version: 'v1beta', auth: await getAuthedClient(accountId) });
 }
 
 /** Analytics Admin API: account summaries list every GA4 property the user can read. */
-export async function discoverGa4Properties(client?: analyticsadmin_v1beta.Analyticsadmin) {
-  const admin = client ?? (await adminClient());
+export async function discoverGa4Properties(client?: analyticsadmin_v1beta.Analyticsadmin, accountId?: string | null) {
+  const admin = client ?? (await adminClient(accountId));
   const found: string[] = [];
   let pageToken: string | undefined;
   do {
@@ -36,6 +36,7 @@ export async function discoverGa4Properties(client?: analyticsadmin_v1beta.Analy
             accountDisplayName: acct.displayName ?? null,
             propertyType: p.propertyType ?? null,
             source: 'discovered',
+            googleAccountId: accountId ?? null,
           })
           .onConflictDoUpdate({
             target: ga4Properties.propertyName,
@@ -45,6 +46,7 @@ export async function discoverGa4Properties(client?: analyticsadmin_v1beta.Analy
               accountDisplayName: acct.displayName ?? null,
               propertyType: p.propertyType ?? null,
               isAccessible: true,
+              googleAccountId: sql.raw(`coalesce((select ga.id from google_accounts ga where ga.id = ga4_properties.google_account_id and ga.status <> 'revoked'), excluded.google_account_id)`),
               updatedAt: new Date(),
             },
           });
@@ -52,11 +54,11 @@ export async function discoverGa4Properties(client?: analyticsadmin_v1beta.Analy
     }
     pageToken = res.data.nextPageToken ?? undefined;
   } while (pageToken);
-  if (found.length) {
+  if (accountId) {
     await db
       .update(ga4Properties)
       .set({ isAccessible: false, updatedAt: new Date() })
-      .where(notInArray(ga4Properties.propertyName, found));
+      .where(and(eq(ga4Properties.googleAccountId, accountId), found.length ? notInArray(ga4Properties.propertyName, found) : sql`true`));
   }
   return found.length;
 }
@@ -65,7 +67,7 @@ export async function discoverGa4Properties(client?: analyticsadmin_v1beta.Analy
 export async function refreshGa4PropertyDetails(propertyId: string, client?: analyticsadmin_v1beta.Analyticsadmin) {
   const [prop] = await db.select().from(ga4Properties).where(eq(ga4Properties.id, propertyId));
   if (!prop) throw notFound('GA4 property');
-  const admin = client ?? (await adminClient());
+  const admin = client ?? (await adminClient(prop.googleAccountId));
   const res = await withRetry(() => admin.properties.get({ name: prop.propertyName }));
   await db
     .update(ga4Properties)
@@ -159,7 +161,7 @@ export async function syncGa4Property(
       /* details are optional; continue */
     }
   }
-  const api = opts.client ?? (await dataClient());
+  const api = opts.client ?? (await dataClient(prop.googleAccountId));
   const dateRanges = [{ startDate: range.start, endDate: range.end }];
   const now = new Date();
 
@@ -293,7 +295,7 @@ export async function ga4RangeTotals(propertyId: string, range: { start: string;
   const [prop] = await db.select().from(ga4Properties).where(eq(ga4Properties.id, propertyId));
   if (!prop) throw notFound('GA4 property');
   return cached(`range:${prop.id}:${range.start}:${range.end}`, 15 * 60_000, async () => {
-    const api = await dataClient();
+    const api = await dataClient(prop.googleAccountId);
     const rep = await runWithKeyEventFallback(api, prop.propertyName, {
       dateRanges: [{ startDate: range.start, endDate: range.end }],
       metrics: ['activeUsers', 'newUsers', 'totalUsers', 'sessions', 'engagedSessions', 'engagementRate', 'userEngagementDuration', 'screenPageViews', 'eventCount', 'keyEvents'].map(
@@ -310,7 +312,7 @@ export async function ga4Realtime(propertyId: string) {
   const [prop] = await db.select().from(ga4Properties).where(eq(ga4Properties.id, propertyId));
   if (!prop) throw notFound('GA4 property');
   return cached(`rt:${prop.id}`, 60_000, async () => {
-    const api = await dataClient();
+    const api = await dataClient(prop.googleAccountId);
     const run = (dimensions: string[], limit = 10) =>
       withRetry(() =>
         api.properties.runRealtimeReport({

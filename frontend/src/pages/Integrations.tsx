@@ -6,11 +6,12 @@ import { useAction } from '../lib/hooks';
 import { useToast, errMsg } from '../lib/context';
 import { fmtAgo, fmtDate } from '../lib/format';
 import { Button, Card, DataTable, Field, Input, Modal, Notice, PageHeader, Select, StatusBadge, Skeleton } from '../components/ui';
-import { connectGoogle, PropertySelector } from './Onboarding';
+import { PropertySelector } from './Onboarding';
+import { GoogleAccountsCard, type GoogleAccount } from '../components/GoogleAccounts';
 
 interface Svc { status: string; lastError?: string | null; lastCheckedAt?: string | null; lastSuccessAt?: string | null; serviceAccountEmail?: string | null; model?: string; provider?: string; scope?: string }
 interface Integrations {
-  google: { oauthConfigured: boolean; connected: boolean; email: string | null; status: string | null; scopes: string[] };
+  google: { oauthConfigured: boolean; connected: boolean; email: string | null; status: string | null; scopes: string[]; accounts: GoogleAccount[] };
   services: Record<'search_console' | 'ga4' | 'admob' | 'play_reporting' | 'openai' | 'email', Svc>;
   counts: Record<string, number>;
 }
@@ -54,7 +55,6 @@ export default function IntegrationsPage() {
   const [logJob, setLogJob] = useState<Job | null>(null);
   const inv = [['integrations'], ['properties'], ['jobs'], ['sync-status']];
 
-  const disconnect = useAction(() => post('/api/google/disconnect'), { success: 'Google account disconnected and tokens revoked', invalidate: inv });
   const run = useAction((v: { service: string; start?: string; end?: string }) => post('/api/sync/run', v), { success: 'Job queued', invalidate: inv });
   const uploadSa = useAction(async (f: File) => post<{ clientEmail: string }>('/api/integrations/play-service-account', { json: await f.text() }), { success: (r) => `Service account ${r.clientEmail} saved (encrypted). Discovering apps…`, invalidate: inv });
   const removeSa = useAction(() => del('/api/integrations/play-service-account'), { success: 'Service account removed', invalidate: inv });
@@ -67,24 +67,7 @@ export default function IntegrationsPage() {
     <div>
       <PageHeader eyebrow="System" title="Integrations" subtitle="Connection status, property selection and synchronization for every Google service." actions={<Button icon={<RefreshCw className="h-4 w-4" />} onClick={() => post('/api/integrations/discover').then(() => toast('info', 'Discovery queued')).catch((e) => toast('error', errMsg(e)))}>Re-discover properties</Button>} />
 
-      <Card title="Google account (OAuth 2.0)" subtitle="Read-only scopes; refresh token encrypted at rest with AES-256-GCM">
-        <div className="flex flex-col gap-4 md:flex-row md:items-center">
-          <div className="flex-1">
-            {d.google.connected ? (
-              <>
-                <div className="flex items-center gap-2"><StatusBadge status={d.google.status ?? 'connected'} /><span className="font-semibold">{d.google.email}</span></div>
-                <div className="mt-2 flex flex-wrap gap-1">{d.google.scopes.filter((s) => s.startsWith('https')).map((s) => <span key={s} className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[10.5px] text-muted">{s.replace('https://www.googleapis.com/auth/', '')}</span>)}</div>
-              </>
-            ) : (
-              <div className="text-sm text-ink-2">{d.google.oauthConfigured ? 'Not connected.' : 'Backend OAuth client is not configured (GOOGLE_CLIENT_ID / SECRET / REDIRECT_URI).'}</div>
-            )}
-          </div>
-          <div className="flex gap-2">
-            <Button variant="primary" disabled={!d.google.oauthConfigured} icon={<ExternalLink className="h-4 w-4" />} onClick={() => connectGoogle().catch((e) => toast('error', errMsg(e)))}>{d.google.connected ? 'Reconnect' : 'Connect Google Account'}</Button>
-            {d.google.connected && <Button variant="danger" icon={<Unplug className="h-4 w-4" />} loading={disconnect.isPending} onClick={() => confirm('Disconnect Google? Tokens will be revoked; stored history is kept.') && disconnect.mutate(undefined)}>Disconnect</Button>}
-          </div>
-        </div>
-      </Card>
+      <GoogleAccountsCard accounts={d.google.accounts ?? []} configured={d.google.oauthConfigured} />
 
       <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         {SVC.map((s) => {
