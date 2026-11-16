@@ -50,7 +50,7 @@ export function PropertySelector() {
   );
   return (
     <div className="grid gap-5 xl:grid-cols-2">
-      <Card title="Search Console properties" subtitle={`${d.searchConsole.length} discovered · domain and URL-prefix`} source="Sites API">
+      <Card title="Search Console properties" subtitle={`${d.searchConsole.length} discovered · switch on one property per site (prefer sc-domain:)`} source="Sites API">
         {d.searchConsole.length ? (
           <ul className="divide-y divide-line">{d.searchConsole.map((p) => row(p.id, p.siteUrl, `${p.propertyType === 'domain' ? 'Domain property' : 'URL-prefix property'} · ${p.permissionLevel ?? 'unknown permission'}`, p.isSelected, 'search-console', p.id, p.syncStatus, p.lastSyncedAt, !p.isAccessible))}</ul>
         ) : (

@@ -88,3 +88,20 @@ describe('app health classification', () => {
     expect(classifyHealth(1.2, 0.1, { ...t, crashRateWarning: 1.5 })).toBe('healthy');
   });
 });
+
+import { expectedCtr, trendOf } from '../src/services/reports/growth.js';
+describe('growth formulas', () => {
+  it('interpolates the CTR benchmark by position', () => {
+    expect(expectedCtr(1)).toBeCloseTo(0.284);
+    expect(expectedCtr(3)).toBeCloseTo(0.11);
+    expect(expectedCtr(3.5)!).toBeCloseTo((0.11 + 0.08) / 2);
+    expect(expectedCtr(15)).toBe(0.012);
+    expect(expectedCtr(null)).toBeNull();
+  });
+  it('classifies growth status with ±5% bands', () => {
+    expect(trendOf(12, 100)).toBe('growing');
+    expect(trendOf(-8, 100)).toBe('declining');
+    expect(trendOf(2, 100)).toBe('stable');
+    expect(trendOf(null, null)).toBe('no_data');
+  });
+});

@@ -19,6 +19,8 @@ import { buildReport, REPORT_TYPES } from '../services/reports/builder.js';
 import { renderPdf, renderExcel, renderCsv } from '../services/reports/render.js';
 import { generateDailyReport, listDailyReports, dailyEmailHtml } from '../services/reports/daily.js';
 import rateLimit from 'express-rate-limit';
+import { sendEmail, emailConfigured } from '../services/email.js';
+import { escapeHtml } from '../services/alerts.js';
 
 const guard = [requireAuth, csrfProtection];
 
@@ -381,31 +383,105 @@ ai.post(
 export const reports = Router();
 reports.use(...guard);
 
+const reportRequest = z.object({
+  type: z.enum(REPORT_TYPES),
+  format: z.enum(['pdf', 'xlsx', 'csv']).default('pdf'),
+  preset: z.string().default('last28'),
+  start: z.string().optional(),
+  end: z.string().optional(),
+  websiteId: uuid.optional(),
+  appId: uuid.optional(),
+});
+const recipientsSchema = z.array(z.string().trim().toLowerCase().email()).min(1, 'Add at least one recipient').max(20);
+
+async function produce(b: z.infer<typeof reportRequest>) {
+  const r = await rangeFromQuery({ preset: b.preset, start: b.start, end: b.end });
+  const doc = await buildReport(b.type, r.current, r.previous, { websiteId: b.websiteId, appId: b.appId });
+  const content = b.format === 'pdf' ? await renderPdf(doc) : b.format === 'xlsx' ? await renderExcel(doc) : renderCsv(doc);
+  const mime = b.format === 'pdf' ? 'application/pdf' : b.format === 'xlsx' ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : 'text/csv';
+  const fileName = `dp360-${b.type}-${r.current.start}_${r.current.end}.${b.format}`;
+  const [row] = await db
+    .insert(reportFiles)
+    .values({ reportType: b.type, format: b.format, title: doc.title, params: { ...b, range: r.current, summary: doc.executiveSummary }, fileName, mimeType: mime, sizeBytes: content.length, content })
+    .returning({ id: reportFiles.id, title: reportFiles.title, fileName: reportFiles.fileName, format: reportFiles.format, sizeBytes: reportFiles.sizeBytes, createdAt: reportFiles.createdAt });
+  return { row, doc, content, mime };
+}
+
+function reportEmailHtml(title: string, subtitle: string, summary: string[], actions: Array<{ priority: string; area: string; action: string; impact: string }>, fileName: string) {
+  const color: Record<string, string> = { critical: '#b91c1c', high: '#c2410c', medium: '#1d4ed8', low: '#475569' };
+  return `<!doctype html><html><body style="font-family:Segoe UI,Arial,sans-serif;background:#f8fafc;padding:20px;color:#0f172a">
+  <div style="max-width:680px;margin:auto;background:#fff;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden">
+    <div style="background:#0b1324;color:#fff;padding:20px 24px">
+      <div style="color:#22d3ee;font-size:11px;letter-spacing:2px;font-weight:700">DIGITAL PERFORMANCE 360</div>
+      <div style="font-size:20px;font-weight:700;margin-top:4px">${escapeHtml(title)}</div>
+      <div style="color:#cbd5e1;font-size:12px">${escapeHtml(subtitle)}</div>
+    </div>
+    <div style="padding:16px 24px">
+      <h3 style="font-size:14px;margin:8px 0">Executive summary</h3>
+      <ul style="padding-left:18px;margin:0">${summary.map((l) => `<li style="margin:4px 0">${escapeHtml(l)}</li>`).join('')}</ul>
+      ${actions.length ? `<h3 style="font-size:14px;margin:18px 0 8px">Top actions</h3>${actions
+        .slice(0, 8)
+        .map((a) => `<div style="border:1px solid #e2e8f0;border-radius:8px;padding:10px;margin:6px 0"><span style="background:${color[a.priority] ?? '#475569'};color:#fff;border-radius:10px;padding:2px 8px;font-size:10px;font-weight:700">${escapeHtml(a.priority.toUpperCase())}</span> <b>${escapeHtml(a.area)}</b><div style="margin-top:4px">${escapeHtml(a.action)}</div><div style="color:#64748b;font-size:12px;margin-top:2px">Expected impact: ${escapeHtml(a.impact)}</div></div>`)
+        .join('')}` : ''}
+      <p style="color:#64748b;font-size:12px;margin-top:18px">The full report is attached (${escapeHtml(fileName)}). Figures are computed from your connected Google data; estimates are labelled as such.</p>
+    </div>
+  </div></body></html>`;
+}
+
 reports.post(
   '/generate',
   h(async (req, res) => {
-    const b = parse(
-      z.object({
-        type: z.enum(REPORT_TYPES),
-        format: z.enum(['pdf', 'xlsx', 'csv']),
-        preset: z.string().default('last28'),
-        start: z.string().optional(),
-        end: z.string().optional(),
-        websiteId: uuid.optional(),
-        appId: uuid.optional(),
-      }),
-      req.body,
-    );
-    const r = await rangeFromQuery({ preset: b.preset, start: b.start, end: b.end });
-    const doc = await buildReport(b.type, r.current, r.previous, { websiteId: b.websiteId, appId: b.appId });
-    const content = b.format === 'pdf' ? await renderPdf(doc) : b.format === 'xlsx' ? await renderExcel(doc) : renderCsv(doc);
-    const mime = b.format === 'pdf' ? 'application/pdf' : b.format === 'xlsx' ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : 'text/csv';
-    const fileName = `dp360-${b.type}-${r.current.start}_${r.current.end}.${b.format}`;
-    const [row] = await db
-      .insert(reportFiles)
-      .values({ reportType: b.type, format: b.format, title: doc.title, params: { ...b, range: r.current }, fileName, mimeType: mime, sizeBytes: content.length, content })
-      .returning({ id: reportFiles.id, title: reportFiles.title, fileName: reportFiles.fileName, format: reportFiles.format, sizeBytes: reportFiles.sizeBytes, createdAt: reportFiles.createdAt });
+    const b = parse(reportRequest, req.body);
+    const { row } = await produce(b);
     ok(res, row, undefined, 201);
+  }),
+);
+
+/** Structured report as JSON for the in-app viewer (nothing stored). */
+reports.post(
+  '/preview',
+  h(async (req, res) => {
+    const b = parse(reportRequest, req.body);
+    const r = await rangeFromQuery({ preset: b.preset, start: b.start, end: b.end });
+    ok(res, await buildReport(b.type, r.current, r.previous, { websiteId: b.websiteId, appId: b.appId }));
+  }),
+);
+
+/** Generate, store and email a report to any recipients. */
+reports.post(
+  '/send',
+  h(async (req, res) => {
+    const b = parse(reportRequest.extend({ recipients: recipientsSchema }), req.body);
+    if (!emailConfigured()) throw new AppError(409, 'email_not_configured', 'Email delivery is not configured on the backend (Resend/SMTP).');
+    const { row, doc, content, mime } = await produce(b);
+    const actions = doc.sections.find((x) => x.actions)?.actions ?? [];
+    await sendEmail({
+      to: b.recipients,
+      subject: `${doc.title} — ${doc.period.start} to ${doc.period.end}`,
+      html: reportEmailHtml(doc.title, doc.subtitle, doc.executiveSummary, actions, row.fileName),
+      attachments: [{ filename: row.fileName, content, contentType: mime }],
+    });
+    ok(res, { ...row, sentTo: b.recipients });
+  }),
+);
+
+/** Email a previously generated file. */
+reports.post(
+  '/files/:id/email',
+  h(async (req, res) => {
+    const { id } = parse(idParam, req.params);
+    const { recipients } = parse(z.object({ recipients: recipientsSchema }), req.body);
+    if (!emailConfigured()) throw new AppError(409, 'email_not_configured', 'Email delivery is not configured on the backend (Resend/SMTP).');
+    const [f] = await db.select().from(reportFiles).where(eq(reportFiles.id, id));
+    if (!f) throw notFound('Report');
+    const params = f.params as { range?: { start: string; end: string }; summary?: string[] };
+    await sendEmail({
+      to: recipients,
+      subject: `${f.title}${params.range ? ` — ${params.range.start} to ${params.range.end}` : ''}`,
+      html: reportEmailHtml(f.title, params.range ? `${params.range.start} to ${params.range.end}` : '', params.summary ?? [], [], f.fileName),
+      attachments: [{ filename: f.fileName, content: f.content, contentType: f.mimeType }],
+    });
+    ok(res, { sentTo: recipients });
   }),
 );
 

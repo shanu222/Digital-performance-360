@@ -12,6 +12,7 @@ import { discoverGa4Properties, syncGa4Property } from '../google/ga4.js';
 import { discoverAdmob, syncAdmobAccount } from '../google/admob.js';
 import { discoverPlayApps, syncPlayApp, playFreshness } from '../google/playReporting.js';
 import { evaluateAlerts, raiseNotification } from '../alerts.js';
+import { discoverGa4Streams, linkEntities } from '../linking.js';
 import { runDailyAnalysis } from '../ai.js';
 import { generateDailyReport, sendSummaryEmail } from '../reports/daily.js';
 import { enqueue, heartbeat, log, type Job } from './queue.js';
@@ -114,6 +115,11 @@ export async function handleJob(job: Job): Promise<HandlerResult> {
           }
         }
         await ensureWebsitesForSelected();
+        try {
+          result.ga4_streams = await discoverGa4Streams();
+        } catch (err) {
+          errors.push(`ga4_streams: ${errorMessage(err)}`);
+        }
       } else {
         result.google = 'not connected';
       }
@@ -126,6 +132,7 @@ export async function handleJob(job: Job): Promise<HandlerResult> {
       } else {
         result.play_reporting = 'service account not configured';
       }
+      result.linking = await linkEntities();
       return { status: errors.length ? 'partial' : 'success', result, error: errors.join(' | ') || undefined };
     }
 

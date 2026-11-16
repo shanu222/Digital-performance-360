@@ -139,6 +139,10 @@ export const ga4Properties = pgTable('ga4_properties', {
   propertyType: text('property_type'),
   timeZone: text('time_zone'),
   currencyCode: text('currency_code'),
+  /** hostnames of GA4 web data streams (www stripped) — used to link websites */
+  webDomains: text('web_domains').array().notNull().default(sql`'{}'::text[]`),
+  /** package names of GA4/Firebase Android data streams — used to link apps */
+  androidPackages: text('android_packages').array().notNull().default(sql`'{}'::text[]`),
   isSelected: boolean('is_selected').notNull().default(false),
   isAccessible: boolean('is_accessible').notNull().default(true),
   source: text('source').notNull().default('discovered'),

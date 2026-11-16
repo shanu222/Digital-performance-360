@@ -5,7 +5,7 @@ import { Plus, RefreshCw, Pencil, Trash2, LayoutGrid, List, ExternalLink } from 
 import { api, post, patch, del } from '../lib/api';
 import { useAction, useWebsites, type WebsiteRow } from '../lib/hooks';
 import { fmtAgo, fmtNum, fmtPos, fmtRatio, fmtCompact } from '../lib/format';
-import { Button, Card, Change, DataTable, Empty, ErrorBox, Field, Input, Modal, PageHeader, Select, StatusBadge, Tabs, Skeleton } from '../components/ui';
+import { Button, Card, Change, DataTable, Empty, ErrorBox, Field, Input, Modal, Notice, PageHeader, Select, StatusBadge, Tabs, Skeleton } from '../components/ui';
 
 interface PropList {
   searchConsole: Array<{ id: string; siteUrl: string }>;
@@ -106,6 +106,11 @@ export default function Websites() {
         }
       />
       {q.error && <ErrorBox error={q.error} retry={() => q.refetch()} />}
+      <div className="mb-4">
+        <Notice>
+          Websites appear here when you switch on their Search Console or GA4 property under <b>Integrations → Monitored properties</b>; GA4 web streams are matched to websites automatically. A site missing from Integrations means the connected Google account has no access to it — in Search Console open that property → Settings → Users and permissions → Add user (the connected Gmail, Full or Owner), then click <b>Re-discover properties</b>.
+        </Notice>
+      </div>
       {view === 'table' ? (
         <Card pad={false}>
           <DataTable

@@ -8,6 +8,13 @@
       "when": 1794814321853,
       "tag": "0000_init",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1794826398166,
+      "tag": "0001_ga4_streams",
+      "breakpoints": true
     }
   ]
 }

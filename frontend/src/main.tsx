@@ -1,4 +1,4 @@
-import { StrictMode, lazy, Suspense } from 'react';
+import { StrictMode, Suspense } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -7,25 +7,26 @@ import { AuthProvider, RangeProvider, ToastProvider, useAuth } from './lib/conte
 import { Layout } from './components/Layout';
 import { Skeleton } from './components/ui';
 import Login from './pages/Login';
+import { ErrorBoundary, lazyPage } from './components/ErrorBoundary';
 
-const Overview = lazy(() => import('./pages/Overview'));
-const Onboarding = lazy(() => import('./pages/Onboarding'));
-const Websites = lazy(() => import('./pages/Websites'));
-const WebsiteDetail = lazy(() => import('./pages/WebsiteDetail'));
-const Seo = lazy(() => import('./pages/Seo'));
-const Keywords = lazy(() => import('./pages/Keywords').then((m) => ({ default: m.Keywords })));
-const PagesPerf = lazy(() => import('./pages/Keywords').then((m) => ({ default: m.PagesPerformance })));
-const Indexing = lazy(() => import('./pages/Indexing'));
-const Traffic = lazy(() => import('./pages/Traffic'));
-const Apps = lazy(() => import('./pages/Apps'));
-const AppDetail = lazy(() => import('./pages/AppDetail'));
-const PlayHealth = lazy(() => import('./pages/PlayHealth'));
-const Admob = lazy(() => import('./pages/Admob'));
-const AI = lazy(() => import('./pages/AI'));
-const Reports = lazy(() => import('./pages/Reports'));
-const Notifications = lazy(() => import('./pages/Notifications'));
-const Integrations = lazy(() => import('./pages/Integrations'));
-const SettingsPage = lazy(() => import('./pages/Settings'));
+const Overview = lazyPage(() => import('./pages/Overview'));
+const Onboarding = lazyPage(() => import('./pages/Onboarding'));
+const Websites = lazyPage(() => import('./pages/Websites'));
+const WebsiteDetail = lazyPage(() => import('./pages/WebsiteDetail'));
+const Seo = lazyPage(() => import('./pages/Seo'));
+const Keywords = lazyPage(() => import('./pages/Keywords').then((m) => ({ default: m.Keywords })));
+const PagesPerf = lazyPage(() => import('./pages/Keywords').then((m) => ({ default: m.PagesPerformance })));
+const Indexing = lazyPage(() => import('./pages/Indexing'));
+const Traffic = lazyPage(() => import('./pages/Traffic'));
+const Apps = lazyPage(() => import('./pages/Apps'));
+const AppDetail = lazyPage(() => import('./pages/AppDetail'));
+const PlayHealth = lazyPage(() => import('./pages/PlayHealth'));
+const Admob = lazyPage(() => import('./pages/Admob'));
+const AI = lazyPage(() => import('./pages/AI'));
+const Reports = lazyPage(() => import('./pages/Reports'));
+const Notifications = lazyPage(() => import('./pages/Notifications'));
+const Integrations = lazyPage(() => import('./pages/Integrations'));
+const SettingsPage = lazyPage(() => import('./pages/Settings'));
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 60_000, refetchOnWindowFocus: false, retry: (n, e) => n < 1 && !(e as { status?: number }).status } },
@@ -57,6 +58,7 @@ function Protected() {
   if (!user) return <Navigate to="/login" replace state={{ from: loc.pathname }} />;
   return (
     <Layout>
+      <ErrorBoundary resetKey={loc.pathname}>
       <Suspense fallback={<Loading />}>
         <Routes>
           <Route path="/" element={<Overview />} />
@@ -80,6 +82,7 @@ function Protected() {
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Suspense>
+      </ErrorBoundary>
     </Layout>
   );
 }

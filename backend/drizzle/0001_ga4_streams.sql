@@ -1,0 +1,2 @@
+ALTER TABLE "ga4_properties" ADD COLUMN "web_domains" text[] DEFAULT '{}'::text[] NOT NULL;--> statement-breakpoint
+ALTER TABLE "ga4_properties" ADD COLUMN "android_packages" text[] DEFAULT '{}'::text[] NOT NULL;

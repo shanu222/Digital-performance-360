@@ -51,9 +51,12 @@ export async function renderPdf(doc: ReportDoc): Promise<Buffer> {
       pdf.font('Sans-Oblique').fontSize(8).fillColor(MUTED).text(s.note, { width: W });
       pdf.moveDown(0.4);
     }
+    if (s.callouts?.length) drawCallouts(pdf, s.callouts, W);
+    if (s.actions?.length) drawActions(pdf, s.actions, W);
     if (s.kpis?.length) drawKpis(pdf, s.kpis, W);
     if (s.chart && s.chart.labels.length > 0) drawChart(pdf, s.chart, W);
     if (s.table) drawTable(pdf, s.table, W);
+    if (s.definitions?.length) drawTable(pdf, { title: 'Definitions', headers: ['Metric', 'Formula', 'Meaning'], rows: s.definitions.map((d) => [d.term, d.formula, d.meaning]) }, W, [0.2, 0.36, 0.44]);
     pdf.moveDown(0.6);
   }
 
@@ -180,14 +183,57 @@ function fmtAxis(v: number) {
   return v % 1 ? v.toFixed(2) : String(v);
 }
 
-function drawTable(pdf: PDFKit.PDFDocument, t: ReportTable, W: number) {
+const TONE = { good: ['#ecfdf3', '#15803d'], bad: ['#fef2f2', '#b91c1c'], info: ['#eff6ff', '#1d4ed8'] } as const;
+
+function drawCallouts(pdf: PDFKit.PDFDocument, list: NonNullable<ReportDoc['sections'][number]['callouts']>, W: number) {
+  for (const c of list) {
+    pdf.font('Sans').fontSize(8.5);
+    const h = pdf.heightOfString(c.text, { width: W - 20 }) + 10;
+    ensure(pdf, h + 4);
+    const y = pdf.y;
+    const [bg, fg] = TONE[c.tone];
+    pdf.roundedRect(42, y, W, h, 3).fill(bg);
+    pdf.rect(42, y, 3, h).fill(fg);
+    pdf.fillColor('#0f172a').text(c.text, 52, y + 5, { width: W - 20 });
+    pdf.y = y + h + 4;
+  }
+  pdf.x = 42;
+  pdf.moveDown(0.3);
+}
+
+const PRIORITY_COLOR = { critical: '#b91c1c', high: '#c2410c', medium: '#1d4ed8', low: '#475569' } as const;
+
+function drawActions(pdf: PDFKit.PDFDocument, list: NonNullable<ReportDoc['sections'][number]['actions']>, W: number) {
+  list.forEach((a, i) => {
+    pdf.font('Sans').fontSize(8.5);
+    const body = `${a.action}`;
+    const meta = `Evidence: ${a.evidence}   ·   Expected impact: ${a.impact}${a.source ? `   ·   Source: ${a.source}` : ''}`;
+    const h = pdf.heightOfString(body, { width: W - 96 }) + pdf.font('Sans').fontSize(7.5).heightOfString(meta, { width: W - 96 }) + 16;
+    ensure(pdf, h + 4);
+    const y = pdf.y;
+    pdf.roundedRect(42, y, W, h, 4).fillAndStroke(i % 2 ? '#ffffff' : '#f8fafc', '#e2e8f0');
+    pdf.roundedRect(50, y + 7, 64, 14, 7).fill(PRIORITY_COLOR[a.priority]);
+    pdf.font('Sans-Bold').fontSize(7).fillColor('#ffffff').text(a.priority.toUpperCase(), 50, y + 10.5, { width: 64, align: 'center' });
+    pdf.font('Sans').fontSize(6.5).fillColor(MUTED).text(a.area, 50, y + 25, { width: 64, align: 'center' });
+    pdf.font('Sans-Bold').fontSize(8.5).fillColor('#0f172a').text(body, 124, y + 7, { width: W - 96 });
+    pdf.font('Sans').fontSize(7.5).fillColor('#475569').text(meta, 124, pdf.y + 2, { width: W - 96 });
+    pdf.y = y + h + 4;
+  });
+  pdf.x = 42;
+  pdf.moveDown(0.3);
+}
+
+const NUMERIC = /^[-+≈]?\s*([A-Z]{3}\s)?[-+]?[\d.,]+\s*(%|pts?|pos|days)?$|^—$/;
+
+function drawTable(pdf: PDFKit.PDFDocument, t: ReportTable, W: number, ratios?: number[]) {
   const maxRows = 60;
   const cols = t.headers.length;
   // first column wider for labels
-  const first = Math.min(W * 0.36, Math.max(W / cols, 120));
+  const first = Math.min(W * 0.3, Math.max(W / cols, 110));
   const rest = (W - first) / Math.max(1, cols - 1);
-  const widths = t.headers.map((_, i) => (i === 0 ? first : rest));
-  const fs = cols > 7 ? 6.5 : 7.5;
+  const widths = ratios ? ratios.map((r) => r * W) : t.headers.map((_, i) => (i === 0 ? first : rest));
+  const fs = cols > 10 ? 5.8 : cols > 7 ? 6.5 : 7.5;
+  const numericCol = t.headers.map((_, i) => !ratios && i > 0 && t.rows.length > 0 && t.rows.every((r) => r[i] == null || typeof r[i] === 'number' || NUMERIC.test(String(r[i]))));
 
   const drawHeader = () => {
     const y = pdf.y;
@@ -195,7 +241,7 @@ function drawTable(pdf: PDFKit.PDFDocument, t: ReportTable, W: number) {
     let x = 42;
     pdf.font('Sans-Bold').fontSize(fs).fillColor('#ffffff');
     t.headers.forEach((h, i) => {
-      pdf.text(h, x + 4, y + 4, { width: widths[i] - 8, align: i === 0 ? 'left' : 'right', lineBreak: false, ellipsis: true });
+      pdf.text(h, x + 4, y + 4, { width: widths[i] - 8, align: numericCol[i] ? 'right' : 'left', lineBreak: false, ellipsis: true });
       x += widths[i];
     });
     pdf.y = y + 16;
@@ -215,7 +261,7 @@ function drawTable(pdf: PDFKit.PDFDocument, t: ReportTable, W: number) {
     let x = 42;
     pdf.font('Sans').fontSize(fs).fillColor('#0f172a');
     cellText.forEach((c, i) => {
-      pdf.text(c, x + 4, y + 3, { width: widths[i] - 8, align: i === 0 ? 'left' : 'right' });
+      pdf.text(c, x + 4, y + 3, { width: widths[i] - 8, align: numericCol[i] ? 'right' : 'left' });
       x += widths[i];
     });
     pdf.y = y + h;
@@ -264,6 +310,13 @@ export async function renderExcel(doc: ReportDoc): Promise<Buffer> {
   };
 
   for (const s of doc.sections) {
+    if (s.callouts?.length) {
+      summary.addRow([s.title]).font = { bold: true };
+      s.callouts.forEach((c) => summary.addRow([`${c.tone === 'bad' ? '⚠ ' : c.tone === 'good' ? '✓ ' : 'ℹ '}${c.text}`]));
+      summary.addRow([]);
+    }
+    if (s.actions?.length) addTableSheet(wb, sheetName('Action plan'), { title: 'Action plan', headers: ['Priority', 'Area', 'Action', 'Evidence', 'Expected impact', 'Source'], rows: s.actions.map((a) => [a.priority.toUpperCase(), a.area, a.action, a.evidence, a.impact, a.source ?? 'Rules']) });
+    if (s.definitions?.length) addTableSheet(wb, sheetName('Formulas'), { title: 'Formulas', headers: ['Metric', 'Formula', 'Meaning'], rows: s.definitions.map((d) => [d.term, d.formula, d.meaning]) });
     if (s.table) addTableSheet(wb, sheetName(s.table.title || s.title), s.table);
     if (s.chart && s.chart.labels.length) {
       const ws = wb.addWorksheet(sheetName(`${s.chart.title}`));
@@ -294,7 +347,9 @@ export function renderCsv(doc: ReportDoc): Buffer {
     if (s.kpis?.length) {
       parts.push('', `# ${s.title}`, toCsv(['Metric', 'Value', 'Change'], s.kpis.map((k) => [k.label, k.value, k.change ?? ''])));
     }
+    if (s.actions?.length) parts.push('', '# Action plan', toCsv(['Priority', 'Area', 'Action', 'Evidence', 'Expected impact'], s.actions.map((a) => [a.priority, a.area, a.action, a.evidence, a.impact])));
     if (s.table) parts.push('', `# ${s.table.title}`, toCsv(s.table.headers, s.table.rows));
+    if (s.definitions?.length) parts.push('', '# Formulas', toCsv(['Metric', 'Formula', 'Meaning'], s.definitions.map((d) => [d.term, d.formula, d.meaning])));
   }
   return Buffer.from('﻿' + parts.join('\n'), 'utf8');
 }

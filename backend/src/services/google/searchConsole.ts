@@ -25,9 +25,9 @@ export function propertyTypeOf(siteUrl: string) {
 }
 
 export function domainOf(siteUrl: string) {
-  if (siteUrl.startsWith('sc-domain:')) return siteUrl.slice('sc-domain:'.length);
+  if (siteUrl.startsWith('sc-domain:')) return siteUrl.slice('sc-domain:'.length).replace(/^www\./, '').toLowerCase();
   try {
-    return new URL(siteUrl).hostname.replace(/^www\./, '');
+    return new URL(siteUrl).hostname.replace(/^www\./, '').toLowerCase();
   } catch {
     return siteUrl;
   }
@@ -388,7 +388,10 @@ export async function ensureWebsitesForSelected() {
     const res = await db
       .insert(websites)
       .values({ name: domain, domain, searchConsolePropertyId: p.id })
-      .onConflictDoUpdate({ target: websites.domain, set: { searchConsolePropertyId: p.id, updatedAt: new Date() } })
+      .onConflictDoUpdate({
+        target: websites.domain,
+        set: { searchConsolePropertyId: sql`coalesce(${websites.searchConsolePropertyId}, ${p.id}::uuid)`, updatedAt: new Date() },
+      })
       .returning({ id: websites.id });
     created += res.length;
   }

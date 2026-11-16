@@ -37,6 +37,7 @@ import { getSettings, updateSettings } from '../services/settings.js';
 import { sendEmail, emailConfigured } from '../services/email.js';
 import { aiConfigured, providerOverview, updateAiConfig, setProviderKey, testProvider, PROVIDERS } from '../services/aiProviders.js';
 import { ensureWebsitesForSelected } from '../services/google/searchConsole.js';
+import { linkEntities } from '../services/linking.js';
 import { errorMessage, logger } from '../lib/logger.js';
 import { idParam } from './_shared.js';
 
@@ -240,6 +241,7 @@ integrations.patch(
     if (!row) throw notFound('Property');
     if (isSelected) {
       await ensureWebsitesForSelected();
+      await linkEntities().catch(() => undefined);
       await enqueue('search_console', { targetId: id, trigger: 'manual' });
     }
     ok(res, row);
@@ -253,7 +255,11 @@ integrations.patch(
     const { isSelected } = parse(selectBody, req.body);
     const [row] = await db.update(ga4Properties).set({ isSelected, updatedAt: new Date() }).where(eq(ga4Properties.id, id)).returning();
     if (!row) throw notFound('Property');
-    if (isSelected) await enqueue('ga4', { targetId: id, trigger: 'manual' });
+    if (isSelected) {
+      // create/link the website or app this GA4 property measures (from its data streams)
+      await linkEntities().catch(() => undefined);
+      await enqueue('ga4', { targetId: id, trigger: 'manual' });
+    }
     ok(res, row);
   }),
 );

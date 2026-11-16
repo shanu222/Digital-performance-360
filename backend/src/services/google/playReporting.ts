@@ -162,12 +162,15 @@ export async function syncPlayApp(appId: string, range: { start: string; end: st
     }
   }
 
+  // Crash and ANR are the core vitals; the other sets are often unavailable for
+  // apps below Google's minimum-user thresholds, which is normal, not a failure.
+  const coreFailed = failures.filter((f) => f.startsWith('crashRate') || f.startsWith('anrRate'));
   await db
     .update(playConsoleApps)
     .set({
       lastSyncedAt: now,
-      syncStatus: failures.length === VITAL_SETS.length ? 'failed' : failures.length ? 'partial' : 'success',
-      lastError: failures.length ? failures.join(' | ').slice(0, 2000) : null,
+      syncStatus: failures.length === VITAL_SETS.length ? 'failed' : coreFailed.length ? 'partial' : 'success',
+      lastError: coreFailed.length ? coreFailed.join(' | ').slice(0, 2000) : null,
       updatedAt: now,
     })
     .where(eq(playConsoleApps.id, app.id));

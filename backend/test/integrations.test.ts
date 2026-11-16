@@ -275,7 +275,7 @@ describe('Play Developer Reporting integration', () => {
     const r = await syncPlayApp(app.id, { start: '2026-11-14', end: '2026-11-15' }, api as never);
     expect(r.results.slowStartRate).toBe('unavailable');
     const [row] = await db.select().from(s.playConsoleApps);
-    expect(row.syncStatus).toBe('partial');
+    expect(row.syncStatus).toBe('success'); // optional metric sets missing is normal
     const v = await vitalsSummary([app.id], { start: '2026-11-14', end: '2026-11-15' });
     expect(v.find((x) => x.metric === 'crashRate')?.value).toBeCloseTo(1.5);
     expect(v.find((x) => x.metric === 'errorReportCount')?.value).toBe(84);
@@ -326,6 +326,24 @@ describe('Report generation', () => {
       expect(xlsx.subarray(0, 2).toString()).toBe('PK');
       expect(renderCsv(doc).toString()).toContain(doc.title);
     }
+  });
+
+  it('builds a growth report with an action plan, opportunities and formulas', async () => {
+    await seedGoogle();
+    const end = '2026-11-15';
+    const mock = mockSearchConsole({ end, n: 28, clicks: (i) => (i < 21 ? 100 : 50) });
+    await discoverSearchConsoleProperties(mock as never);
+    await db.update(s.searchConsoleProperties).set({ isSelected: true });
+    await ensureWebsitesForSelected();
+    for (const p of await db.select().from(s.searchConsoleProperties)) await syncSearchConsoleProperty(p.id, { start: addDays(end, -27), end }, { client: mock as never });
+    const doc = await buildReport('portfolio', { start: addDays(end, -13), end }, { start: addDays(end, -27), end: addDays(end, -14) });
+    expect(doc.sections[0].title).toMatch(/Action plan/);
+    expect(doc.sections.some((x) => /striking-distance/i.test(x.title))).toBe(true);
+    expect(doc.sections.at(-1)!.definitions!.some((d) => d.term === 'ARPDAU')).toBe(true);
+    const scorecard = doc.sections.find((x) => /scorecard/i.test(x.title))!;
+    expect(scorecard.table!.rows.length).toBeGreaterThan(0);
+    const pdf = await renderPdf(doc);
+    expect(pdf.subarray(0, 4).toString()).toBe('%PDF');
   });
 
   it('builds a daily report from stored data', async () => {

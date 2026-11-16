@@ -17,7 +17,8 @@ import {
   vitalsTimeseries,
   classifyHealth,
 } from '../metrics.js';
-import { portfolioOverview, websiteRows, appRows } from '../portfolio.js';
+import { portfolioOverview, appRows } from '../portfolio.js';
+import { growthSections, aiActions, sortActions, DEFINITIONS } from './growth.js';
 
 export const REPORT_TYPES = [
   'portfolio',
@@ -49,12 +50,32 @@ export interface ReportTable {
   headers: string[];
   rows: Array<Array<string | number | null>>;
 }
+export interface ReportCallout {
+  tone: 'good' | 'bad' | 'info';
+  text: string;
+}
+export interface ReportAction {
+  priority: 'critical' | 'high' | 'medium' | 'low';
+  area: string;
+  action: string;
+  evidence: string;
+  impact: string;
+  source?: string;
+}
+export interface ReportDefinition {
+  term: string;
+  formula: string;
+  meaning: string;
+}
 export interface ReportSection {
   title: string;
   note?: string;
+  callouts?: ReportCallout[];
   kpis?: ReportKpi[];
   chart?: ReportChart;
   table?: ReportTable;
+  actions?: ReportAction[];
+  definitions?: ReportDefinition[];
 }
 export interface ReportDoc {
   title: string;
@@ -264,7 +285,29 @@ async function aiSection(cur: Range, entity?: { type: string; id: string }): Pro
   };
 }
 
+function actionPlanSection(actions: ReportAction[]): ReportSection {
+  return {
+    title: 'Action plan — what to do next',
+    note: 'Prioritised from the evidence in this report (rules) and stored AI recommendations. Impacts are estimates, not guarantees.',
+    actions,
+    ...(actions.length ? {} : { callouts: [{ tone: 'good' as const, text: 'No actions triggered — all monitored metrics are within thresholds.' }] }),
+  };
+}
+
+/** Numbers content sections 1..n (the action plan and formulas appendix stay unnumbered). */
+function numbered(doc: ReportDoc): ReportDoc {
+  let i = 0;
+  return {
+    ...doc,
+    sections: doc.sections.map((s) => (/^(Action plan|Methodology)/.test(s.title) ? s : { ...s, title: `${++i}. ${s.title}` })),
+  };
+}
+
 export async function buildReport(type: ReportType, cur: Range, prev: Range, opts: { websiteId?: string; appId?: string } = {}): Promise<ReportDoc> {
+  return numbered(await buildReportInner(type, cur, prev, opts));
+}
+
+async function buildReportInner(type: ReportType, cur: Range, prev: Range, opts: { websiteId?: string; appId?: string } = {}): Promise<ReportDoc> {
   const base = { period: cur, previousPeriod: prev, generatedAt: new Date().toISOString() };
   const sub = `${cur.start} to ${cur.end} · compared with ${prev.start} to ${prev.end}`;
 
@@ -279,55 +322,41 @@ export async function buildReport(type: ReportType, cur: Range, prev: Range, opt
     case 'portfolio':
     case 'monthly_executive': {
       const ov = await portfolioOverview(cur, prev);
-      const seo = await seoSections(null, cur, prev, 'All websites');
-      const traffic = await trafficSections(null, cur, prev, 'All websites');
-      const ad = await admobSections(cur, prev);
+      const g = await growthSections(cur, prev);
       const vit = await vitalsSections(null, cur);
-      const sites = await websiteRows(cur, prev);
-      const apps = await appRows(cur, prev);
-      const exec = [
-        `Portfolio: ${ov.websites} website(s) and ${ov.androidApps} Android app(s) monitored.`,
-        ...seo.summary,
-        ...traffic.summary,
-        ...ad.summary,
-        ...vit.summary,
-        ov.decliningWebsites.length ? `Declining websites: ${ov.decliningWebsites.map((d) => d.name).join(', ')}.` : 'No website declined by more than 10% versus the previous period.',
-      ];
+      const actions = sortActions([...g.actions, ...(await aiActions(cur))]).slice(0, 25);
+      const top = actions.slice(0, 3).map((a, i) => `Priority ${i + 1} (${a.priority}): ${a.area} — ${a.action}`);
       return {
         ...base,
-        title: type === 'monthly_executive' ? 'Monthly Executive Report' : 'Complete Portfolio Report',
+        title: type === 'monthly_executive' ? 'Monthly Executive Growth Report' : 'Portfolio Growth Report',
         subtitle: sub,
         sources: ['Google Search Console', 'Google Analytics 4', 'Google AdMob', 'Google Play Developer Reporting'],
-        executiveSummary: exec,
+        executiveSummary: [
+          `Portfolio: ${ov.websites} website(s) and ${ov.androidApps} Android app(s) monitored.`,
+          ...g.summary,
+          ...vit.summary,
+          ...(top.length ? top : ['No urgent actions detected for this period.']),
+        ],
         sections: [
-          {
-            title: 'Websites',
-            table: {
-              title: 'Website comparison',
-              headers: ['Website', 'Clicks', 'Clicks chg', 'Impressions', 'CTR', 'Avg pos', 'Sessions', 'Sess. chg', 'SEO health'],
-              rows: sites.map((s) => [s.name, s.clicks, chg(s.clicksChangePct) ?? '—', s.impressions, pct(s.ctr), s.position?.toFixed(1) ?? '—', s.sessions, chg(s.sessionsChangePct) ?? '—', s.seoHealth ?? '—']),
-            },
-          },
-          ...seo.sections.slice(0, 1),
-          ...traffic.sections.slice(0, 2),
-          {
-            title: 'Android applications',
-            table: {
-              title: 'Applications',
-              headers: ['App', 'Package', 'Health', 'Crash %', 'ANR %', 'Est. earnings'],
-              rows: apps.map((a) => [a.name, a.packageName, a.health.replace('_', ' '), a.crashRate?.toFixed(2) ?? '—', a.anrRate?.toFixed(2) ?? '—', a.earnings.map((e) => money(e.earnings, e.currency)).join(', ') || '—']),
-            },
-          },
-          ...ad.sections,
+          actionPlanSection(actions),
+          ...g.sections,
           ...vit.sections,
-          await aiSection(cur),
+          { title: 'Methodology & formulas', note: 'All figures are computed from data stored by Digital Performance 360. Benchmarks and projections are estimates.', definitions: DEFINITIONS },
         ],
       };
     }
     case 'website_seo': {
       const w = await website();
-      const seo = await seoSections(w.searchConsolePropertyId ? [w.searchConsolePropertyId] : [], cur, prev, w.name);
-      return { ...base, title: `SEO Report — ${w.name}`, subtitle: sub, sources: ['Google Search Console'], executiveSummary: seo.summary, sections: [...seo.sections, await aiSection(cur, { type: 'website', id: w.id })] };
+      const g = await growthSections(cur, prev, { websiteId: w.id });
+      const actions = sortActions([...g.actions, ...(await aiActions(cur, { type: 'website', id: w.id }))]).slice(0, 20);
+      return {
+        ...base,
+        title: `Website Growth Report — ${w.name}`,
+        subtitle: `${w.domain} · ${sub}`,
+        sources: ['Google Search Console', 'Google Analytics 4'],
+        executiveSummary: [...g.summary, ...actions.slice(0, 3).map((a, i) => `Priority ${i + 1} (${a.priority}): ${a.action}`)],
+        sections: [actionPlanSection(actions), ...g.sections, { title: 'Methodology & formulas', definitions: DEFINITIONS }],
+      };
     }
     case 'website_traffic': {
       const w = await website();
@@ -367,13 +396,21 @@ export async function buildReport(type: ReportType, cur: Range, prev: Range, opt
       const vit = a.playConsoleAppId ? await vitalsSections([a.playConsoleAppId], cur) : { sections: [{ title: 'Android vitals', note: 'Play Developer Reporting is not linked to this app.' }], summary: [] };
       const traffic = a.ga4PropertyId ? await trafficSections([a.ga4PropertyId], cur, prev, a.name) : { sections: [{ title: 'App analytics', note: 'No GA4/Firebase property linked.' }], summary: [] };
       const ad = am ? await admobSections(cur, prev, [am.appId]) : { sections: [{ title: 'AdMob', note: 'No AdMob app linked.' }], summary: [] };
+      const g = await growthSections(cur, prev, { appId: a.id });
       return {
         ...base,
         title: `Android App Report — ${a.name}`,
         subtitle: `${a.packageName} · ${sub}`,
         sources: ['Google Play Developer Reporting', 'Google Analytics 4 / Firebase', 'Google AdMob'],
-        executiveSummary: [...vit.summary, ...traffic.summary, ...ad.summary],
-        sections: [...vit.sections, ...traffic.sections, ...ad.sections, await aiSection(cur, { type: 'android_app', id: a.id })],
+        executiveSummary: [...g.summary, ...vit.summary, ...traffic.summary],
+        sections: [
+          actionPlanSection(sortActions([...g.actions, ...(await aiActions(cur, { type: 'android_app', id: a.id }))]).slice(0, 15)),
+          ...g.sections,
+          ...vit.sections,
+          ...traffic.sections,
+          ...ad.sections.slice(1),
+          { title: 'Methodology & formulas', definitions: DEFINITIONS },
+        ],
       };
     }
     case 'play_health': {
@@ -381,8 +418,17 @@ export async function buildReport(type: ReportType, cur: Range, prev: Range, opt
       return { ...base, title: 'Google Play Health Report', subtitle: sub, sources: ['Google Play Developer Reporting'], executiveSummary: v.summary, sections: v.sections };
     }
     case 'admob': {
+      const g = await growthSections(cur, prev, { skipWebsites: true });
       const ad = await admobSections(cur, prev);
-      return { ...base, title: 'AdMob Revenue Report', subtitle: sub, sources: ['Google AdMob Network Report'], executiveSummary: ad.summary, sections: ad.sections };
+      const actions = sortActions(g.actions);
+      return {
+        ...base,
+        title: 'AdMob Revenue Report',
+        subtitle: sub,
+        sources: ['Google AdMob Network Report', 'Google Analytics 4 (DAU)', 'Google Play vitals'],
+        executiveSummary: g.summary,
+        sections: [actionPlanSection(actions), ...g.sections, ...ad.sections.slice(1), { title: 'Methodology & formulas', definitions: DEFINITIONS }],
+      };
     }
     case 'ai_recommendations': {
       const sec = await aiSection(cur);
