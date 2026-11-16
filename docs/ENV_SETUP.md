@@ -7,15 +7,16 @@
 | Service | Source | Root Directory | Config file |
 |---|---|---|---|
 | **Postgres** | New → Database → PostgreSQL | — | — |
-| **dp360-api** | GitHub `shanu222/Digital-performance-360` | `backend` | `backend/railway.json` (default) |
-| **dp360-worker** | same repo | `backend` | `backend/railway.worker.json` (Settings → Config-as-code) |
+| **dp360-api** | GitHub `shanu222/Digital-performance-360` | `backend` | Start command `npm run start` · health check `/api/health` |
+| **dp360-worker** | same repo | `backend` | Start command `npm run start:worker` · health check `/health` |
 
 API service settings:
 - Networking → Generate Domain (target port = `PORT`, Railway sets it)
-- Healthcheck path `/api/health` (comes from railway.json)
+- Healthcheck path `/api/health`
 
 Worker service settings:
-- Config file `backend/railway.worker.json`. It sets the start command `npm run start:worker` and the health check `/health`.
+- Custom start command `npm run start:worker` and healthcheck path `/health`, both under Settings → Deploy.
+- Add the variable `SKIP_MIGRATIONS=true`.
 - A public domain is not needed.
 
 ## Railway: dp360-api variables

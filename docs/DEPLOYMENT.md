@@ -18,7 +18,9 @@ See the README quick start. You need two backend terminals (`npm run dev` and `n
 
 1. **New → GitHub Repo**, pick this repository, then go to **Settings**:
    - **Root Directory:** `backend`
-   - Railway reads `backend/railway.json`. It builds with `npm ci && npm run build`, starts with `npm run start`, and health-checks `/api/health`.
+   - **Build:** Railpack is detected automatically. It installs the packages and runs `npm run build`.
+   - **Deploy → Custom Start Command:** `npm run start`
+   - **Deploy → Healthcheck Path:** `/api/health`
 2. **Variables.** Add these under the service's **Variables** tab. You can use the RAW editor and paste the block:
 
 ```
@@ -53,8 +55,10 @@ RUN_SCHEDULER_IN_API=false
 ## 4. Sync worker on Railway
 
 1. In the same project, **New → GitHub Repo** again with the same repository, and set **Root Directory** to `backend`.
-2. Go to **Settings → Config-as-code → Railway config file** and set it to `backend/railway.worker.json`. That file sets the start command to `npm run start:worker`, the health check to `/health`, and the restart policy to always restart. Without this setting, the worker would read `railway.json`, which is the API's config.
-3. **Variables.** Use the same values as the API. Railway's *Shared Variables* let you define them once. Leave out the `ADMIN_*` values. Keep `RUN_SCHEDULER_IN_API=false` on the API service.
+2. Go to **Settings → Deploy**:
+   - **Custom Start Command:** `npm run start:worker`
+   - **Healthcheck Path:** `/health`
+3. **Variables.** Use the same values as the API. Railway's *Shared Variables* let you define them once. Leave out the `ADMIN_*` values and add `SKIP_MIGRATIONS=true`, so that only the API runs migrations. Keep `RUN_SCHEDULER_IN_API=false` on the API service.
 4. The worker runs node-cron in your configured time zone. It writes jobs to the Postgres queue and processes them. It runs all the time, so data keeps arriving even when nobody is logged in. Schedules can be edited under **Settings** in the dashboard, and the worker reloads them within 5 minutes.
 
 > Do not use Vercel functions or Railway cron containers for syncs. Long syncs (initial backfills) can take several minutes, and the worker service is designed for that.
