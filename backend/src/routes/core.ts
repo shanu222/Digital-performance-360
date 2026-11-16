@@ -35,7 +35,7 @@ import {
 import { enqueue, recentJobs } from '../services/sync/queue.js';
 import { getSettings, updateSettings } from '../services/settings.js';
 import { sendEmail, emailConfigured } from '../services/email.js';
-import { aiConfigured } from '../services/ai.js';
+import { aiConfigured, providerOverview, updateAiConfig, setProviderKey, testProvider, PROVIDERS } from '../services/aiProviders.js';
 import { ensureWebsitesForSelected } from '../services/google/searchConsole.js';
 import { errorMessage, logger } from '../lib/logger.js';
 import { idParam } from './_shared.js';
@@ -190,7 +190,16 @@ integrations.get(
         ga4: by.ga4 ?? { status: acct ? 'connected' : 'not_configured' },
         admob: by.admob ?? { status: acct ? 'connected' : 'not_configured' },
         play_reporting: { ...(by.play_reporting ?? { status: 'not_configured' }), serviceAccountEmail: play?.client_email ?? null, scope: PLAY_REPORTING_SCOPE },
-        openai: { status: aiConfigured() ? 'connected' : 'not_configured', model: env.OPENAI_MODEL },
+        openai: await (async () => {
+          const ov = await providerOverview();
+          const active = ov.providers.filter((p) => p.enabled && p.keySource);
+          const bad = active.filter((p) => ['invalid_key', 'quota_exceeded'].includes(p.status.status));
+          return {
+            status: !active.length ? 'not_configured' : bad.length === active.length ? 'error' : bad.length ? 'partial' : 'connected',
+            model: active.map((p) => `${p.label}: ${p.models[0]}`).join(' → ') || undefined,
+            lastError: bad.map((p) => `${p.label}: ${p.status.status.replace('_', ' ')}`).join('; ') || null,
+          };
+        })(),
         email: { status: emailConfigured() ? 'connected' : 'not_configured', provider: env.EMAIL_PROVIDER },
       },
       counts,
@@ -311,7 +320,7 @@ integrations.delete(
 
 export const settings = Router();
 settings.use(requireAuth, csrfProtection);
-settings.get('/', h(async (_req, res) => ok(res, { settings: await getSettings(), emailConfigured: emailConfigured(), aiConfigured: aiConfigured(), env: { timezone: env.APP_TIMEZONE, currency: env.DEFAULT_CURRENCY } })));
+settings.get('/', h(async (_req, res) => ok(res, { settings: await getSettings(), emailConfigured: emailConfigured(), aiConfigured: await aiConfigured(), env: { timezone: env.APP_TIMEZONE, currency: env.DEFAULT_CURRENCY } })));
 settings.put(
   '/',
   requireRole('admin'),
@@ -324,6 +333,58 @@ settings.put(
     }
   }),
 );
+/* ---------------- AI providers (admin) ---------------- */
+
+const providerParam = z.object({ provider: z.enum(PROVIDERS) });
+
+settings.get('/ai', h(async (_req, res) => ok(res, await providerOverview())));
+
+settings.put(
+  '/ai',
+  requireRole('admin'),
+  h(async (req, res) => {
+    try {
+      await updateAiConfig(req.body);
+    } catch (err) {
+      if (err instanceof z.ZodError) throw new AppError(422, 'validation_error', 'Invalid AI settings', z.treeifyError(err));
+      throw err;
+    }
+    ok(res, await providerOverview());
+  }),
+);
+
+/** Replace a provider key (stored encrypted). The full key is never returned. */
+settings.put(
+  '/ai/keys/:provider',
+  requireRole('admin'),
+  h(async (req, res) => {
+    const { provider } = parse(providerParam, req.params);
+    const { key } = parse(z.object({ key: z.string().trim().min(10).max(500) }), req.body);
+    await setProviderKey(provider, key);
+    const status = await testProvider(provider);
+    ok(res, { overview: await providerOverview(), status });
+  }),
+);
+
+/** Remove the dashboard key so the environment variable (if any) is used again. */
+settings.delete(
+  '/ai/keys/:provider',
+  requireRole('admin'),
+  h(async (req, res) => {
+    const { provider } = parse(providerParam, req.params);
+    await setProviderKey(provider, null);
+    ok(res, await providerOverview());
+  }),
+);
+
+settings.post(
+  '/ai/test/:provider',
+  h(async (req, res) => {
+    const { provider } = parse(providerParam, req.params);
+    ok(res, await testProvider(provider));
+  }),
+);
+
 settings.post(
   '/test-email',
   h(async (_req, res) => {

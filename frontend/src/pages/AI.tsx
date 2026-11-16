@@ -114,8 +114,8 @@ function Chat({ configured }: { configured: boolean }) {
     setInput('');
     setBusy(true);
     try {
-      const r = await post<{ answer: string; toolsUsed: string[] }>('/api/ai/chat', { messages: next.map(({ role, content }) => ({ role, content })) });
-      setMsgs([...next, { role: 'assistant', content: r.answer, tools: r.toolsUsed }]);
+      const r = await post<{ answer: string; toolsUsed: string[]; model?: string }>('/api/ai/chat', { messages: next.map(({ role, content }) => ({ role, content })) });
+      setMsgs([...next, { role: 'assistant', content: r.answer, tools: r.model ? [...r.toolsUsed, `via ${r.model}`] : r.toolsUsed }]);
     } catch (e) {
       setMsgs([...next, { role: 'assistant', content: `⚠️ ${errMsg(e)}` }]);
     } finally {
@@ -163,7 +163,7 @@ function Chat({ configured }: { configured: boolean }) {
             void send(input);
           }}
         >
-          <input value={input} onChange={(e) => setInput(e.target.value)} disabled={!configured} placeholder={configured ? 'Ask a question…' : 'Set OPENAI_API_KEY on the backend to enable chat'} className="h-10 flex-1 rounded-lg border border-line-strong bg-surface-2 px-3 text-sm focus:border-accent focus:outline-none" maxLength={4000} />
+          <input value={input} onChange={(e) => setInput(e.target.value)} disabled={!configured} placeholder={configured ? 'Ask a question…' : 'Add an AI provider key in Settings to enable chat'} className="h-10 flex-1 rounded-lg border border-line-strong bg-surface-2 px-3 text-sm focus:border-accent focus:outline-none" maxLength={4000} />
           <Button type="submit" variant="primary" disabled={!configured || !input.trim()} loading={busy} icon={<Send className="h-4 w-4" />} />
         </form>
       </div>
@@ -186,7 +186,7 @@ export default function AI() {
         subtitle="Recommendations generated only from evidence in your stored analytics."
         actions={<Button variant="gold" icon={<Wand2 className="h-4 w-4" />} disabled={!configured} loading={analyze.isPending} onClick={() => analyze.mutate(undefined)}>Run analysis now</Button>}
       />
-      {q.data && !configured && <div className="mb-4"><Notice tone="warn">AI is not configured. Add OPENAI_API_KEY to the Railway backend variables (it is never exposed to the browser).</Notice></div>}
+      {q.data && !configured && <div className="mb-4"><Notice tone="warn">AI is not configured. Add an OpenAI, Gemini or OpenRouter key in Settings → AI providers (keys stay encrypted on the server).</Notice></div>}
       <div className="grid gap-5 xl:grid-cols-[1fr_440px]">
         <Card
           title="Recommendations"

@@ -343,7 +343,7 @@ ai.get(
       .where(and(...conds))
       .orderBy(desc(aiInsights.generatedForDate), sql`case ${aiInsights.priority} when 'critical' then 0 when 'high' then 1 when 'medium' then 2 else 3 end`)
       .limit(q.limit);
-    ok(res, rows, { configured: aiConfigured() });
+    ok(res, rows, { configured: await aiConfigured() });
   }),
 );
 
@@ -361,7 +361,7 @@ ai.patch(
 ai.post(
   '/analyze',
   h(async (req, res) => {
-    if (!aiConfigured()) throw new AppError(409, 'ai_not_configured', 'Set OPENAI_API_KEY on the backend to enable AI analysis');
+    if (!(await aiConfigured())) throw new AppError(409, 'ai_not_configured', 'Add an AI provider key in Settings → AI providers to enable AI analysis');
     const b = parse(z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() }), req.body ?? {});
     ok(res, await enqueue('ai_analysis', { trigger: 'manual', params: b.date ? { date: b.date } : {} }), undefined, 202);
   }),

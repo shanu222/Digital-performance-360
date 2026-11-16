@@ -35,8 +35,21 @@ GOOGLE_REDIRECT_URI=https://<api-railway-domain>/api/google/callback
 GOOGLE_PLAY_SERVICE_ACCOUNT_JSON_BASE64=
 TOKEN_ENCRYPTION_KEY=<32 random bytes base64 — never change after first use>
 SESSION_SECRET=<long random string>
+AI_PROVIDER_ORDER=openai,gemini,openrouter
+AI_FALLBACK_ENABLED=true
+AI_CACHE_ENABLED=true
+AI_CACHE_TTL=3600
+AI_MAX_RETRIES=3
+AI_TIMEOUT_MS=45000
+AI_LOGGING=true
 OPENAI_API_KEY=<sk-...>
-OPENAI_MODEL=gpt-4o-mini
+OPENAI_MODEL=gpt-4.1
+OPENAI_FALLBACK_MODEL=gpt-4.1-mini
+GEMINI_API_KEY=<gemini key>
+GEMINI_MODEL=gemini-2.5-flash
+GEMINI_FALLBACK_MODEL=gemini-2.0-flash
+OPENROUTER_API_KEY=<sk-or-...>
+OPENROUTER_MODELS=<comma-separated model ids>
 EMAIL_PROVIDER=resend
 EMAIL_PROVIDER_API_KEY=<re_...>
 EMAIL_FROM=Digital Performance 360 <reports@<verified-domain>>
@@ -82,6 +95,10 @@ After the first deploy, copy the Vercel URL into `FRONTEND_URL` on Railway and r
 
 See [GOOGLE_SETUP.md](./GOOGLE_SETUP.md). The redirect URI in the OAuth client must equal `GOOGLE_REDIRECT_URI` exactly.
 
-## OpenAI
+## AI providers
+
+Keys set in **Settings → AI providers** override the environment variables. They are stored encrypted, and from there you can test each key, reorder providers, and change models. Key status shows *Working*, *Invalid or expired key*, *Quota / credit limit exceeded*, *Rate limited* or *Model unavailable*.
+
+### OpenAI
 
 platform.openai.com → API keys → create a key → paste it into `OPENAI_API_KEY` on **both** Railway services. Set a monthly usage limit in Billing.

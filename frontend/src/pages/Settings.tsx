@@ -4,6 +4,7 @@ import { Save, Send, KeyRound } from 'lucide-react';
 import { api, post, put } from '../lib/api';
 import { useAction } from '../lib/hooks';
 import { useAuth } from '../lib/context';
+import { AiProvidersCard } from '../components/AiProviders';
 import { Button, Card, Field, Input, Notice, PageHeader, Select, Skeleton, Toggle } from '../components/ui';
 
 interface Settings {
@@ -90,12 +91,14 @@ export default function SettingsPage() {
         </Card>
 
         <Card title="AI analysis">
-          {!q.data?.aiConfigured && <div className="mb-4"><Notice tone="warn">OPENAI_API_KEY is not set on the backend.</Notice></div>}
+          {!q.data?.aiConfigured && <div className="mb-4"><Notice tone="warn">No AI provider key is configured yet — add one under AI providers below.</Notice></div>}
           <div className="grid gap-3">
             <label className="flex items-center justify-between text-sm"><span className="font-semibold">Enable AI features</span><Toggle checked={s.ai.enabled} onChange={(v) => set('ai', { enabled: v })} /></label>
             <label className="flex items-center justify-between text-sm"><span className="font-semibold">Run daily analysis with the morning report</span><Toggle checked={s.ai.dailyAnalysis} onChange={(v) => set('ai', { dailyAnalysis: v })} /></label>
           </div>
         </Card>
+
+        <AiProvidersCard />
 
         <Card title="Alert thresholds" className="xl:col-span-2">
           <div className="grid gap-4 md:grid-cols-3 xl:grid-cols-5">

@@ -21,7 +21,7 @@ const SVC = [
   { key: 'ga4', name: 'Google Analytics 4', icon: BarChart3, desc: 'Data API + Admin API discovery + Realtime' },
   { key: 'admob', name: 'Google AdMob', icon: DollarSign, desc: 'Apps, ad units, network report' },
   { key: 'play_reporting', name: 'Play Developer Reporting', icon: Smartphone, desc: 'Android vitals via service account' },
-  { key: 'openai', name: 'OpenAI', icon: Sparkles, desc: 'AI recommendations and chat (backend only)' },
+  { key: 'openai', name: 'AI providers', icon: Sparkles, desc: 'OpenAI → Gemini → OpenRouter fallback · manage keys in Settings' },
   { key: 'email', name: 'Email delivery', icon: Mail, desc: 'Daily/weekly/monthly reports and critical alerts' },
 ] as const;
 

@@ -25,8 +25,22 @@ const schema = z.object({
   TOKEN_ENCRYPTION_KEY: z.string().min(1, 'TOKEN_ENCRYPTION_KEY is required'),
   SESSION_SECRET: z.string().min(16, 'SESSION_SECRET must be at least 16 characters'),
 
+  // ---- AI providers (keys can be overridden from the admin Settings page) ----
   OPENAI_API_KEY: z.string().optional().default(''),
-  OPENAI_MODEL: z.string().default('gpt-4o-mini'),
+  OPENAI_MODEL: z.string().default('gpt-4.1'),
+  OPENAI_FALLBACK_MODEL: z.string().default('gpt-4.1-mini'),
+  GEMINI_API_KEY: z.string().optional().default(''),
+  GEMINI_MODEL: z.string().default('gemini-2.5-flash'),
+  GEMINI_FALLBACK_MODEL: z.string().default('gemini-2.0-flash'),
+  OPENROUTER_API_KEY: z.string().optional().default(''),
+  OPENROUTER_MODELS: z.string().default('meta-llama/llama-3.3-70b-instruct:free'),
+  AI_PROVIDER_ORDER: z.string().default('openai,gemini,openrouter'),
+  AI_FALLBACK_ENABLED: z.string().optional().transform((v) => v !== 'false'),
+  AI_CACHE_ENABLED: z.string().optional().transform((v) => v !== 'false'),
+  AI_CACHE_TTL: z.coerce.number().default(3600),
+  AI_MAX_RETRIES: z.coerce.number().default(3),
+  AI_TIMEOUT_MS: z.coerce.number().default(45000),
+  AI_LOGGING: z.string().optional().transform((v) => v !== 'false'),
 
   EMAIL_PROVIDER: z.enum(['resend', 'smtp', 'none']).default('none'),
   EMAIL_PROVIDER_API_KEY: z.string().optional().default(''),

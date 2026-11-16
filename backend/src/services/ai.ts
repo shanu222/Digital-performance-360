@@ -4,7 +4,7 @@ import { and, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db/client.js';
 import { aiInsights, websites, androidApps, playConsoleApps, admobApps, sitemapRecords } from '../db/schema.js';
-import { env } from '../config/env.js';
+import { complete, aiConfigured } from './aiProviders.js';
 import { AppError } from '../lib/http.js';
 import { addDays, pctChange, resolveRange, todayIn, type Preset, type Range } from '../lib/dates.js';
 import { errorMessage, logger } from '../lib/logger.js';
@@ -12,12 +12,13 @@ import { getSettings } from './settings.js';
 import { seoTotals, ga4Totals, dimensionTable, breakdown, admobTotals, admobGrouped, vitalsSummary, classifyHealth } from './metrics.js';
 import { portfolioOverview } from './portfolio.js';
 
-function client() {
-  if (!env.OPENAI_API_KEY) throw Object.assign(new AppError(409, 'ai_not_configured', 'OPENAI_API_KEY is not configured on the backend'), { nonRetryable: true });
-  return new OpenAI({ apiKey: env.OPENAI_API_KEY });
-}
+export { aiConfigured } from './aiProviders.js';
 
-export const aiConfigured = () => Boolean(env.OPENAI_API_KEY);
+async function ensureConfigured() {
+  if (!(await aiConfigured())) {
+    throw Object.assign(new AppError(409, 'ai_not_configured', 'No AI provider key is configured. Add one in Settings → AI providers.'), { nonRetryable: true });
+  }
+}
 
 const recSchema = z.object({
   recommendations: z
@@ -168,28 +169,37 @@ export async function admobEvidence(end: string) {
   };
 }
 
+/** Some models wrap JSON in ``` fences even in JSON mode — extract the object. */
+function parseJson(raw: string): unknown {
+  const t = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/```$/, '');
+  const start = t.indexOf('{');
+  const end = t.lastIndexOf('}');
+  return JSON.parse(start >= 0 && end > start ? t.slice(start, end + 1) : t);
+}
+
 async function recommend(evidence: unknown) {
-  const ai = client();
-  const res = await ai.chat.completions.create({
-    model: env.OPENAI_MODEL,
-    temperature: 0.2,
-    response_format: { type: 'json_object' },
-    messages: [
-      { role: 'system', content: SYSTEM_RECS },
-      { role: 'user', content: JSON.stringify(evidence) },
-    ],
-  });
-  const raw = res.choices[0]?.message?.content ?? '{}';
-  const parsed = recSchema.safeParse(JSON.parse(raw));
-  if (!parsed.success) throw new Error('AI returned an unexpected format');
-  return parsed.data.recommendations;
+  const res = await complete(
+    {
+      temperature: 0.2,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: SYSTEM_RECS },
+        { role: 'user', content: JSON.stringify(evidence) },
+      ],
+    },
+    { cacheable: true },
+  );
+  const raw = res.completion.choices[0]?.message?.content ?? '{}';
+  const parsed = recSchema.safeParse(parseJson(raw));
+  if (!parsed.success) throw new Error(`AI (${res.provider}/${res.model}) returned an unexpected format`);
+  return { recs: parsed.data.recommendations, model: `${res.provider}/${res.model}` };
 }
 
 /** Generates and stores recommendations for every monitored website, app and AdMob. */
 export async function runDailyAnalysis(date?: string) {
   const s = await getSettings();
   const end = date ?? addDays(todayIn(s.general.timezone), -1);
-  client(); // fail fast if not configured
+  await ensureConfigured(); // fail fast if not configured
   const sites = await db.select().from(websites).where(eq(websites.isMonitored, true));
   const apps = await db.select().from(androidApps).where(eq(androidApps.isMonitored, true));
   const limit = pLimit(3);
@@ -199,7 +209,7 @@ export async function runDailyAnalysis(date?: string) {
   const store = async (entityType: string, entityId: string | null, label: string, ev: unknown) => {
     if (!ev) return;
     try {
-      const recs = await recommend(ev);
+      const { recs, model } = await recommend(ev);
       await db
         .delete(aiInsights)
         .where(and(eq(aiInsights.entityType, entityType), eq(aiInsights.generatedForDate, end), entityId ? eq(aiInsights.entityId, entityId) : eq(aiInsights.entityType, entityType)));
@@ -217,7 +227,7 @@ export async function runDailyAnalysis(date?: string) {
             potentialImpact: r.potential_impact ?? null,
             category: r.category ?? null,
             generatedForDate: end,
-            model: env.OPENAI_MODEL,
+            model,
           })),
         );
       }
@@ -370,7 +380,7 @@ async function runTool(name: string, args: Record<string, unknown>, tz: string) 
 }
 
 export async function chat(messages: Array<{ role: 'user' | 'assistant'; content: string }>) {
-  const ai = client();
+  await ensureConfigured();
   const s = await getSettings();
   const today = todayIn(s.general.timezone);
   const convo: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
@@ -385,11 +395,13 @@ Be concise; use short bullet lists or small markdown tables when comparing.`,
     ...messages.slice(-12),
   ];
   const sources = new Set<string>();
+  let usedModel = '';
   for (let i = 0; i < 6; i++) {
-    const res = await ai.chat.completions.create({ model: env.OPENAI_MODEL, temperature: 0.2, messages: convo, tools });
-    const msg = res.choices[0]?.message;
+    const res = await complete({ temperature: 0.2, messages: convo, tools });
+    usedModel = `${res.provider}/${res.model}`;
+    const msg = res.completion.choices[0]?.message;
     if (!msg) break;
-    if (!msg.tool_calls?.length) return { answer: msg.content ?? '', toolsUsed: [...sources] };
+    if (!msg.tool_calls?.length) return { answer: msg.content ?? '', toolsUsed: [...sources], model: usedModel };
     convo.push(msg);
     for (const call of msg.tool_calls) {
       if (call.type !== 'function') continue;
@@ -403,5 +415,5 @@ Be concise; use short bullet lists or small markdown tables when comparing.`,
       convo.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(out).slice(0, 60_000) });
     }
   }
-  return { answer: 'I could not complete the analysis within the tool-call limit. Please narrow the question.', toolsUsed: [...sources] };
+  return { answer: 'I could not complete the analysis within the tool-call limit. Please narrow the question.', toolsUsed: [...sources], model: usedModel };
 }
