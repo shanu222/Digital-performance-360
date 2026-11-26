@@ -35,7 +35,7 @@ import {
 import { enqueue, recentJobs } from '../services/sync/queue.js';
 import { getSettings, updateSettings } from '../services/settings.js';
 import { sendEmail, emailConfigured } from '../services/email.js';
-import { aiConfigured, providerOverview, updateAiConfig, setProviderKey, testProvider, PROVIDERS } from '../services/aiProviders.js';
+import { aiConfigured, providerOverview, updateAiConfig, setProviderKey, testProvider, addProvider, addProviderSchema, removeProvider, listProviderModels, PROVIDER_ID } from '../services/aiProviders.js';
 import { ensureWebsitesForSelected } from '../services/google/searchConsole.js';
 import { linkEntities } from '../services/linking.js';
 import { errorMessage, logger } from '../lib/logger.js';
@@ -375,7 +375,7 @@ settings.put(
 );
 /* ---------------- AI providers (admin) ---------------- */
 
-const providerParam = z.object({ provider: z.enum(PROVIDERS) });
+const providerParam = z.object({ provider: z.string().regex(PROVIDER_ID) });
 
 settings.get('/ai', h(async (_req, res) => ok(res, await providerOverview())));
 
@@ -390,6 +390,39 @@ settings.put(
       throw err;
     }
     ok(res, await providerOverview());
+  }),
+);
+
+/** Add another provider entry — a second key for the same service, or a new service/model set. */
+settings.post(
+  '/ai/providers',
+  requireRole('admin'),
+  h(async (req, res) => {
+    const body = parse(addProviderSchema, req.body);
+    const id = await addProvider(body);
+    const status = body.key ? await testProvider(id) : null;
+    ok(res, { id, status, overview: await providerOverview() });
+  }),
+);
+
+/** Delete an added provider (built-ins can only be disabled). */
+settings.delete(
+  '/ai/providers/:provider',
+  requireRole('admin'),
+  h(async (req, res) => {
+    const { provider } = parse(providerParam, req.params);
+    await removeProvider(provider);
+    ok(res, await providerOverview());
+  }),
+);
+
+/** Models available to this provider's key, for the model picker. */
+settings.get(
+  '/ai/providers/:provider/models',
+  requireRole('admin'),
+  h(async (req, res) => {
+    const { provider } = parse(providerParam, req.params);
+    ok(res, await listProviderModels(provider));
   }),
 );
 

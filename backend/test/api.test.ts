@@ -98,6 +98,30 @@ describe('authentication, CSRF and permissions', () => {
     expect((await agent.get('/api/auth/me')).status).toBe(401);
   });
 
+  it('lets the admin add, edit and delete AI providers from Settings', async () => {
+    const agent = request.agent(app());
+    const login = await agent.post('/api/auth/login').set('Origin', ORIGIN).send({ email: 'admin@example.com', password: 'correct horse battery staple' });
+    const csrf = login.body.data.csrfToken;
+    const w = (r: request.Test) => r.set('Origin', ORIGIN).set('X-CSRF-Token', csrf);
+
+    const added = await w(agent.post('/api/settings/ai/providers')).send({ kind: 'deepseek', label: 'DeepSeek main' });
+    expect(added.status).toBe(200);
+    const id = added.body.data.id as string;
+    expect(added.body.data.overview.providers.find((p: { provider: string }) => p.provider === id)).toMatchObject({ label: 'DeepSeek main', models: ['deepseek-chat'], keySource: null });
+    expect(added.body.data.overview.kinds.length).toBeGreaterThan(5);
+
+    const bad = await w(agent.post('/api/settings/ai/providers')).send({ kind: 'custom', baseUrl: 'http://insecure.example/v1', models: ['m'] });
+    expect(bad.status).toBe(422);
+
+    const edited = await w(agent.put('/api/settings/ai')).send({ providers: { [id]: { models: ['deepseek-reasoner', 'deepseek-chat'] } } });
+    expect(edited.body.data.providers.find((p: { provider: string }) => p.provider === id).models).toEqual(['deepseek-reasoner', 'deepseek-chat']);
+
+    expect((await w(agent.delete('/api/settings/ai/providers/openai'))).status).toBe(400);
+    const gone = await w(agent.delete(`/api/settings/ai/providers/${id}`));
+    expect(gone.body.data.providers.some((p: { provider: string }) => p.provider === id)).toBe(false);
+    expect((await w(agent.put(`/api/settings/ai/keys/${id}`)).send({ key: 'sk-whatever-123456' })).status).toBe(404);
+  });
+
   it('returns 404 envelope for unknown endpoints', async () => {
     const r = await request(app()).get('/api/does-not-exist');
     expect(r.status).toBe(404);

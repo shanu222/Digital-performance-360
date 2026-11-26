@@ -17,38 +17,73 @@ import { decrypt, encrypt } from '../lib/crypto.js';
 import { AppError } from '../lib/http.js';
 import { errorMessage, logger } from '../lib/logger.js';
 
+/**
+ * Provider presets. Every one exposes an OpenAI-compatible Chat Completions API,
+ * so a single client type works with a different baseURL. "custom" covers any other
+ * OpenAI-compatible endpoint (self-hosted, Azure proxy, etc.).
+ */
+export const KINDS = {
+  openai: { label: 'OpenAI', baseUrl: undefined as string | undefined, keyHelp: 'platform.openai.com → API keys (sk-…)', models: ['gpt-4.1', 'gpt-4.1-mini'] },
+  gemini: { label: 'Google Gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/', keyHelp: 'aistudio.google.com → Get API key', models: ['gemini-2.5-flash'] },
+  openrouter: { label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', keyHelp: 'openrouter.ai → Keys (sk-or-…)', models: ['openrouter/auto'] },
+  anthropic: { label: 'Anthropic Claude', baseUrl: 'https://api.anthropic.com/v1/', keyHelp: 'console.anthropic.com → API keys (sk-ant-…)', models: ['claude-sonnet-5-5'] },
+  groq: { label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', keyHelp: 'console.groq.com → API keys (gsk_…)', models: ['llama-3.3-70b-versatile'] },
+  deepseek: { label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', keyHelp: 'platform.deepseek.com → API keys', models: ['deepseek-chat'] },
+  mistral: { label: 'Mistral', baseUrl: 'https://api.mistral.ai/v1', keyHelp: 'console.mistral.ai → API keys', models: ['mistral-large-latest'] },
+  xai: { label: 'xAI Grok', baseUrl: 'https://api.x.ai/v1', keyHelp: 'console.x.ai → API keys (xai-…)', models: ['grok-4'] },
+  together: { label: 'Together AI', baseUrl: 'https://api.together.xyz/v1', keyHelp: 'api.together.ai → Settings → API keys', models: ['meta-llama/Llama-3.3-70B-Instruct-Turbo'] },
+  custom: { label: 'Custom (OpenAI-compatible)', baseUrl: undefined as string | undefined, keyHelp: 'Any endpoint that implements /chat/completions', models: [] as string[] },
+} as const;
+export type Kind = keyof typeof KINDS;
+const KIND_IDS = Object.keys(KINDS) as [Kind, ...Kind[]];
+
+/** Built-in entries; they also read keys from Railway env vars and cannot be deleted (only disabled). */
 export const PROVIDERS = ['openai', 'gemini', 'openrouter'] as const;
-export type Provider = (typeof PROVIDERS)[number];
+export type BuiltIn = (typeof PROVIDERS)[number];
+/** Provider entry id: a built-in name or a generated id such as "gemini-k3f9a2". */
+export type Provider = string;
+const isBuiltIn = (id: string): id is BuiltIn => (PROVIDERS as readonly string[]).includes(id);
+export const PROVIDER_ID = /^[a-z0-9][a-z0-9_-]{1,39}$/;
+const MAX_PROVIDERS = 20;
 
-const BASE_URL: Record<Provider, string | undefined> = {
-  openai: undefined,
-  gemini: 'https://generativelanguage.googleapis.com/v1beta/openai/',
-  openrouter: 'https://openrouter.ai/api/v1',
-};
-
-export const PROVIDER_LABEL: Record<Provider, string> = { openai: 'OpenAI', gemini: 'Google Gemini', openrouter: 'OpenRouter' };
+export const PROVIDER_LABEL: Record<BuiltIn, string> = { openai: 'OpenAI', gemini: 'Google Gemini', openrouter: 'OpenRouter' };
 
 /* ------------------------------ configuration ------------------------------ */
 
-const providerCfg = z.object({ enabled: z.boolean(), models: z.array(z.string().min(1)).min(1).max(10) });
-export const aiConfigSchema = z.object({
-  order: z.array(z.enum(PROVIDERS)).min(1),
-  fallbackEnabled: z.boolean(),
-  cacheEnabled: z.boolean(),
-  cacheTtlSec: z.number().int().min(0).max(86_400),
-  maxRetries: z.number().int().min(0).max(5),
-  timeoutMs: z.number().int().min(5_000).max(180_000),
-  logging: z.boolean(),
-  providers: z.object({ openai: providerCfg, gemini: providerCfg, openrouter: providerCfg }),
-});
+const modelList = z.array(z.string().trim().min(1).max(200)).min(1, 'Add at least one model').max(20);
+const httpsUrl = z.string().trim().url().refine((u) => u.startsWith('https://'), 'Base URL must start with https://');
+const providerCfg = z
+  .object({
+    kind: z.enum(KIND_IDS),
+    label: z.string().trim().min(1).max(60),
+    baseUrl: httpsUrl.nullable().optional(),
+    enabled: z.boolean(),
+    models: modelList,
+  })
+  .refine((p) => p.kind !== 'custom' || Boolean(p.baseUrl), { message: 'Custom providers need a base URL', path: ['baseUrl'] });
+export type ProviderCfg = z.infer<typeof providerCfg>;
+
+export const aiConfigSchema = z
+  .object({
+    order: z.array(z.string().regex(PROVIDER_ID)).min(1),
+    fallbackEnabled: z.boolean(),
+    cacheEnabled: z.boolean(),
+    cacheTtlSec: z.number().int().min(0).max(86_400),
+    maxRetries: z.number().int().min(0).max(5),
+    timeoutMs: z.number().int().min(5_000).max(180_000),
+    logging: z.boolean(),
+    providers: z.record(z.string().regex(PROVIDER_ID), providerCfg),
+  })
+  .refine((c) => Object.keys(c.providers).length <= MAX_PROVIDERS, { message: `At most ${MAX_PROVIDERS} providers` });
 export type AiConfig = z.infer<typeof aiConfigSchema>;
 
 const list = (s: string) => s.split(',').map((x) => x.trim()).filter(Boolean);
 
 export function defaultAiConfig(): AiConfig {
-  const order = list(env.AI_PROVIDER_ORDER).filter((p): p is Provider => (PROVIDERS as readonly string[]).includes(p));
+  const order = list(env.AI_PROVIDER_ORDER).filter(isBuiltIn);
+  const fullOrder = [...order, ...PROVIDERS.filter((p) => !order.includes(p))];
   return {
-    order: order.length ? order : [...PROVIDERS],
+    order: fullOrder,
     fallbackEnabled: env.AI_FALLBACK_ENABLED,
     cacheEnabled: env.AI_CACHE_ENABLED,
     cacheTtlSec: env.AI_CACHE_TTL,
@@ -56,14 +91,34 @@ export function defaultAiConfig(): AiConfig {
     timeoutMs: env.AI_TIMEOUT_MS,
     logging: env.AI_LOGGING,
     providers: {
-      openai: { enabled: true, models: [env.OPENAI_MODEL, env.OPENAI_FALLBACK_MODEL].filter(Boolean) },
-      gemini: { enabled: true, models: [env.GEMINI_MODEL, env.GEMINI_FALLBACK_MODEL].filter(Boolean) },
-      openrouter: { enabled: true, models: list(env.OPENROUTER_MODELS).length ? list(env.OPENROUTER_MODELS) : ['openrouter/auto'] },
+      openai: { kind: 'openai', label: 'OpenAI', enabled: true, models: [env.OPENAI_MODEL, env.OPENAI_FALLBACK_MODEL].filter(Boolean) },
+      gemini: { kind: 'gemini', label: 'Google Gemini', enabled: true, models: [env.GEMINI_MODEL, env.GEMINI_FALLBACK_MODEL].filter(Boolean) },
+      openrouter: { kind: 'openrouter', label: 'OpenRouter', enabled: true, models: list(env.OPENROUTER_MODELS).length ? list(env.OPENROUTER_MODELS) : ['openrouter/auto'] },
     },
   };
 }
 
-const ENV_KEY: Record<Provider, () => string> = {
+/**
+ * Merges stored config (possibly from an older version without kind/label) over the
+ * defaults, keeps built-ins present and makes `order` list every provider exactly once.
+ */
+function normalize(stored: Partial<AiConfig> | null | undefined): unknown {
+  const def = defaultAiConfig();
+  const providers: Record<string, unknown> = {};
+  const storedProviders = (stored?.providers ?? {}) as Record<string, Partial<ProviderCfg>>;
+  for (const id of new Set([...Object.keys(def.providers), ...Object.keys(storedProviders)])) {
+    const base = def.providers[id];
+    const merged = { ...(base ?? {}), ...(storedProviders[id] ?? {}) };
+    if (isBuiltIn(id)) merged.kind = id; // a built-in never changes type
+    providers[id] = merged;
+  }
+  const ids = Object.keys(providers);
+  const order = [...new Set((stored?.order ?? def.order).filter((id) => ids.includes(id)))];
+  for (const id of ids) if (!order.includes(id)) order.push(id);
+  return { ...def, ...(stored ?? {}), providers, order };
+}
+
+const ENV_KEY: Record<BuiltIn, () => string> = {
   openai: () => env.OPENAI_API_KEY,
   gemini: () => env.GEMINI_API_KEY,
   openrouter: () => env.OPENROUTER_API_KEY,
@@ -107,43 +162,104 @@ export async function getAiConfig(): Promise<AiConfig> {
 async function loadAll() {
   if (cfgCache && Date.now() - cfgCache.at < 15_000) return cfgCache;
   const stored = await readSetting<Partial<AiConfig>>('ai_config');
-  const def = defaultAiConfig();
-  const merged = { ...def, ...(stored ?? {}), providers: { ...def.providers, ...(stored?.providers ?? {}) } };
-  const parsed = aiConfigSchema.safeParse(merged);
-  const enc = (await readSetting<Partial<Record<Provider, string>>>('ai_keys')) ?? {};
+  const parsed = aiConfigSchema.safeParse(normalize(stored));
+  if (!parsed.success) logger.warn({ issues: parsed.error.issues.slice(0, 3) }, 'Stored AI config invalid — using defaults');
+  const cfg = parsed.success ? parsed.data : defaultAiConfig();
+  const enc = (await readSetting<Record<string, string>>('ai_keys')) ?? {};
   const keys: Partial<Record<Provider, string>> = {};
-  for (const p of PROVIDERS) {
-    if (enc[p]) {
-      try {
-        keys[p] = decrypt(enc[p]!);
-      } catch {
-        logger.warn({ provider: p }, 'Stored AI key could not be decrypted (TOKEN_ENCRYPTION_KEY changed?)');
-      }
+  for (const [p, v] of Object.entries(enc)) {
+    try {
+      keys[p] = decrypt(v);
+    } catch {
+      logger.warn({ provider: p }, 'Stored AI key could not be decrypted (TOKEN_ENCRYPTION_KEY changed?)');
     }
   }
-  cfgCache = { at: Date.now(), cfg: parsed.success ? parsed.data : def, keys };
+  cfgCache = { at: Date.now(), cfg, keys };
   return cfgCache;
 }
 
+const notFound = (id: string) => new AppError(404, 'not_found', `AI provider "${id}" does not exist`);
+async function requireProvider(id: string) {
+  const cfg = await getAiConfig();
+  if (!cfg.providers[id]) throw notFound(id);
+  return cfg.providers[id];
+}
+
+/**
+ * Updates global options, order and existing providers' label/models/enabled/baseUrl.
+ * Providers are added and removed with addProvider/removeProvider, never here.
+ */
 export async function updateAiConfig(patch: unknown) {
   const cur = await getAiConfig();
-  const p = (patch ?? {}) as Partial<AiConfig>;
-  const next = aiConfigSchema.parse({ ...cur, ...p, providers: { ...cur.providers, ...(p.providers ?? {}) } });
+  const p = (patch ?? {}) as Partial<AiConfig> & { providers?: Record<string, Partial<ProviderCfg>> };
+  const providers = { ...cur.providers };
+  for (const [id, v] of Object.entries(p.providers ?? {})) {
+    if (!providers[id]) continue; // unknown ids are ignored, not created
+    providers[id] = { ...providers[id], ...v, kind: providers[id].kind };
+  }
+  const next = aiConfigSchema.parse(normalize({ ...cur, ...p, providers }));
   await writeSetting('ai_config', next);
   cfgCache = null;
   return next;
 }
 
-/** Key in use: dashboard key first, then environment variable. */
+export const addProviderSchema = z.object({
+  kind: z.enum(KIND_IDS),
+  label: z.string().trim().min(1).max(60).optional(),
+  baseUrl: httpsUrl.optional().or(z.literal('').transform(() => undefined)),
+  models: modelList.optional(),
+  key: z.string().trim().min(10).max(500).optional(),
+});
+
+/** Adds another provider entry (e.g. a second Gemini key, or Groq/DeepSeek/custom). Returns its id. */
+export async function addProvider(input: z.infer<typeof addProviderSchema>) {
+  const cur = await getAiConfig();
+  if (Object.keys(cur.providers).length >= MAX_PROVIDERS) throw new AppError(400, 'too_many_providers', `At most ${MAX_PROVIDERS} AI providers can be configured`);
+  const preset = KINDS[input.kind];
+  const models = input.models?.length ? input.models : [...preset.models];
+  if (!models.length) throw new AppError(422, 'validation_error', 'Add at least one model name');
+  if (input.kind === 'custom' && !input.baseUrl) throw new AppError(422, 'validation_error', 'Custom providers need a base URL');
+  const sameKind = Object.values(cur.providers).filter((x) => x.kind === input.kind).length;
+  const label = input.label || (sameKind ? `${preset.label} ${sameKind + 1}` : preset.label);
+  let id = '';
+  do id = `${input.kind}-${crypto.randomBytes(3).toString('hex')}`;
+  while (cur.providers[id]);
+  const entry: ProviderCfg = { kind: input.kind, label, enabled: true, models, ...(input.baseUrl ? { baseUrl: input.baseUrl } : {}) };
+  const next = aiConfigSchema.parse({ ...cur, providers: { ...cur.providers, [id]: entry }, order: [...cur.order, id] });
+  await writeSetting('ai_config', next);
+  cfgCache = null;
+  if (input.key) await setProviderKey(id, input.key);
+  return id;
+}
+
+/** Deletes an added provider with its key and status. Built-ins can only be disabled. */
+export async function removeProvider(id: string) {
+  await requireProvider(id);
+  if (isBuiltIn(id)) throw new AppError(400, 'built_in_provider', 'Built-in providers cannot be deleted — disable them or remove their key instead');
+  const cur = await getAiConfig();
+  const providers = { ...cur.providers };
+  delete providers[id];
+  await writeSetting('ai_config', aiConfigSchema.parse({ ...cur, providers, order: cur.order.filter((x) => x !== id) }));
+  const enc = (await readSetting<Record<string, string>>('ai_keys')) ?? {};
+  delete enc[id];
+  await writeSetting('ai_keys', enc);
+  const st = await getStatuses();
+  delete st[id];
+  await writeSetting('ai_status', st);
+  cfgCache = null;
+}
+
+/** Key in use: dashboard key first, then (built-ins only) the environment variable. */
 async function keyFor(p: Provider): Promise<{ key: string; source: 'dashboard' | 'environment' } | null> {
   const { keys } = await loadAll();
   if (keys[p]) return { key: keys[p]!, source: 'dashboard' };
-  const e = ENV_KEY[p]();
+  const e = isBuiltIn(p) ? ENV_KEY[p]() : '';
   return e ? { key: e, source: 'environment' } : null;
 }
 
 export async function setProviderKey(p: Provider, key: string | null) {
-  const enc = (await readSetting<Partial<Record<Provider, string>>>('ai_keys')) ?? {};
+  await requireProvider(p);
+  const enc = (await readSetting<Record<string, string>>('ai_keys')) ?? {};
   if (key) enc[p] = encrypt(key.trim());
   else delete enc[p];
   await writeSetting('ai_keys', enc);
@@ -168,26 +284,33 @@ export async function providerOverview() {
   const cfg = await getAiConfig();
   const statuses = await getStatuses();
   const out = [];
-  for (const p of PROVIDERS) {
+  for (const p of cfg.order) {
+    const c = cfg.providers[p];
+    if (!c) continue;
     const k = await keyFor(p);
     out.push({
       provider: p,
-      label: PROVIDER_LABEL[p],
-      enabled: cfg.providers[p].enabled,
-      models: cfg.providers[p].models,
+      kind: c.kind,
+      label: c.label,
+      builtIn: isBuiltIn(p),
+      baseUrl: c.baseUrl ?? KINDS[c.kind].baseUrl ?? null,
+      keyHelp: KINDS[c.kind].keyHelp,
+      enabled: c.enabled,
+      models: c.models,
       keySource: k?.source ?? null,
       keyPreview: k ? mask(k.key) : null,
-      envKeyPresent: Boolean(ENV_KEY[p]()),
+      envKeyPresent: isBuiltIn(p) && Boolean(ENV_KEY[p]()),
       position: cfg.order.indexOf(p),
       status: k ? statuses[p] ?? { status: 'untested', message: null, checkedAt: null, lastSuccessAt: null } : { status: 'not_configured', message: null, checkedAt: null, lastSuccessAt: null },
     });
   }
-  return { config: cfg, providers: out };
+  const kinds = KIND_IDS.map((id) => ({ id, label: KINDS[id].label, baseUrl: KINDS[id].baseUrl ?? null, keyHelp: KINDS[id].keyHelp, models: [...KINDS[id].models] }));
+  return { config: cfg, providers: out, kinds, maxProviders: MAX_PROVIDERS };
 }
 
 export async function aiConfigured(): Promise<boolean> {
   const cfg = await getAiConfig();
-  for (const p of cfg.order) if (cfg.providers[p].enabled && (await keyFor(p))) return true;
+  for (const p of cfg.order) if (cfg.providers[p]?.enabled && (await keyFor(p))) return true;
   return false;
 }
 
@@ -213,13 +336,13 @@ export function classify(err: unknown): { status: KeyStatus; message: string; re
 type Params = Omit<OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming, 'model'>;
 
 
-function clientFor(p: Provider, key: string, timeout: number) {
+function clientFor(c: ProviderCfg, key: string, timeout: number) {
   return new OpenAI({
     apiKey: key,
-    baseURL: BASE_URL[p],
+    baseURL: c.baseUrl || KINDS[c.kind].baseUrl,
     timeout,
     maxRetries: 0, // retries handled here so fallback stays predictable
-    defaultHeaders: p === 'openrouter' ? { 'HTTP-Referer': env.FRONTEND_URL.split(',')[0], 'X-Title': 'Digital Performance 360' } : undefined,
+    defaultHeaders: c.kind === 'openrouter' ? { 'HTTP-Referer': env.FRONTEND_URL.split(',')[0], 'X-Title': 'Digital Performance 360' } : undefined,
   });
 }
 
@@ -243,13 +366,17 @@ export async function complete(params: Params, opts: { cacheable?: boolean } = {
   }
 
   const attempts: string[] = [];
-  const order = cfg.fallbackEnabled ? cfg.order : cfg.order.slice(0, 1);
-  for (const p of order) {
-    if (!cfg.providers[p].enabled) continue;
+  let triedProvider = false;
+  for (const p of cfg.order) {
+    const pc = cfg.providers[p];
+    if (!pc?.enabled) continue;
     const k = await keyFor(p);
     if (!k) continue;
-    const client = clientFor(p, k.key, cfg.timeoutMs);
-    const models = cfg.fallbackEnabled ? cfg.providers[p].models : cfg.providers[p].models.slice(0, 1);
+    // without fallback only the first usable provider (enabled + key) is used
+    if (triedProvider && !cfg.fallbackEnabled) break;
+    triedProvider = true;
+    const client = clientFor(pc, k.key, cfg.timeoutMs);
+    const models = cfg.fallbackEnabled ? pc.models : pc.models.slice(0, 1);
     let keyBroken = false;
     for (const model of models) {
       if (keyBroken) break;
@@ -288,6 +415,7 @@ export async function complete(params: Params, opts: { cacheable?: boolean } = {
 
 /** Live check of one provider's key: validity, quota and (OpenRouter) credit limits. */
 export async function testProvider(p: Provider): Promise<ProviderStatus> {
+  const pc = await requireProvider(p);
   const cfg = await getAiConfig();
   const k = await keyFor(p);
   if (!k) {
@@ -295,7 +423,7 @@ export async function testProvider(p: Provider): Promise<ProviderStatus> {
     return (await getStatuses())[p]!;
   }
   let usage: Record<string, unknown> | null = null;
-  if (p === 'openrouter') {
+  if (pc.kind === 'openrouter') {
     try {
       const r = await fetch('https://openrouter.ai/api/v1/key', { headers: { Authorization: `Bearer ${k.key}` } });
       if (r.status === 401 || r.status === 403) {
@@ -313,9 +441,9 @@ export async function testProvider(p: Provider): Promise<ProviderStatus> {
       usage = { error: errorMessage(err) };
     }
   }
-  const model = cfg.providers[p].models[0];
+  const model = pc.models[0];
   try {
-    const client = clientFor(p, k.key, Math.min(cfg.timeoutMs, 30_000));
+    const client = clientFor(pc, k.key, Math.min(cfg.timeoutMs, 30_000));
     await client.chat.completions.create({ model, messages: [{ role: 'user', content: 'Reply with OK' }], max_tokens: 5 });
     await setStatus(p, { status: 'ok', message: `Key works with ${model}`, lastModel: model, usage });
   } catch (err) {
@@ -323,4 +451,23 @@ export async function testProvider(p: Provider): Promise<ProviderStatus> {
     await setStatus(p, { status: c.status, message: c.message.slice(0, 500), usage });
   }
   return (await getStatuses())[p]!;
+}
+
+/** Model ids the provider's key can use (for the Settings model picker). */
+export async function listProviderModels(p: Provider): Promise<string[]> {
+  const pc = await requireProvider(p);
+  const k = await keyFor(p);
+  if (!k) throw new AppError(400, 'no_key', 'Add a key for this provider first');
+  try {
+    const client = clientFor(pc, k.key, 20_000);
+    const ids: string[] = [];
+    for await (const m of client.models.list()) {
+      ids.push(m.id.replace(/^models\//, '')); // Gemini prefixes ids with "models/"
+      if (ids.length >= 1000) break;
+    }
+    return [...new Set(ids)].sort();
+  } catch (err) {
+    const c = classify(err);
+    throw new AppError(502, 'models_unavailable', `Could not list models: ${c.message.slice(0, 300)}`);
+  }
 }
